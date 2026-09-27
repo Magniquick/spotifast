@@ -299,6 +299,59 @@ pub enum PlayerCommand {
 pub enum EngineEvent {
     State(LocalState),
     SessionEnded,
+    /// What Spotify says plays on the active device, pushed as it changes.
+    Remote(RemotePlayback),
+}
+
+/// Playback on the active Connect device, from the cluster updates Spotify
+/// pushes to the engine: no Web API request, and no polling delay.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemotePlayback {
+    pub active_device: Option<String>,
+    pub track_uri: Option<String>,
+    pub playing: bool,
+    /// The position when this was observed, moved on from Spotify's timestamp.
+    pub position_ms: u32,
+    pub observed_at: Instant,
+    pub shuffle: bool,
+    pub repeat: RepeatMode,
+}
+
+impl RemotePlayback {
+    fn from_cluster(
+        active_device: Option<String>,
+        player: Option<&librespot_protocol::player::PlayerState>,
+    ) -> Self {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis() as i64);
+        let playing = player.is_some_and(|player| player.is_playing && !player.is_paused);
+        let position_ms = player.map_or(0, |player| {
+            let mut position = player.position_as_of_timestamp;
+            if playing && player.timestamp > 0 {
+                let elapsed = now_ms.saturating_sub(player.timestamp).max(0) as f64;
+                position = position.saturating_add((elapsed * player.playback_speed) as i64);
+            }
+            position.clamp(0, i64::from(u32::MAX)) as u32
+        });
+        let options = player.and_then(|player| player.options.as_ref());
+        Self {
+            active_device: active_device.filter(|id| !id.is_empty()),
+            track_uri: player
+                .and_then(|player| player.track.as_ref())
+                .map(|track| track.uri.clone())
+                .filter(|uri| !uri.is_empty()),
+            playing,
+            position_ms,
+            observed_at: Instant::now(),
+            shuffle: options.is_some_and(|options| options.shuffling_context),
+            repeat: match options {
+                Some(options) if options.repeating_track => RepeatMode::Track,
+                Some(options) if options.repeating_context => RepeatMode::Context,
+                _ => RepeatMode::Off,
+            },
+        }
+    }
 }
 
 pub type Notify = Arc<dyn Fn(EngineEvent) + Send + Sync>;
@@ -401,6 +454,24 @@ impl Engine {
         )
         .await
         .context("unable to connect to Spotify")?;
+
+        // Spotify pushes every change on the active device to the engine; hand
+        // them on instead of having the app poll the Web API for them.
+        let mut cluster = spirc.watch_cluster_state();
+        let mut player_state = spirc.watch_player_state();
+        let remote_notify = Arc::clone(&notify);
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    changed = cluster.changed() => if changed.is_err() { break },
+                    changed = player_state.changed() => if changed.is_err() { break },
+                }
+                let active = cluster.borrow_and_update().active_device_id.clone();
+                let playback =
+                    RemotePlayback::from_cluster(active, player_state.borrow_and_update().as_ref());
+                remote_notify(EngineEvent::Remote(playback));
+            }
+        });
 
         {
             let mut current = state.lock().unwrap_or_else(|p| p.into_inner());

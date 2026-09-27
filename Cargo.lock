@@ -3240,7 +3240,7 @@ dependencies = [
 [[package]]
 name = "librespot-audio"
 version = "0.8.0"
-source = "git+https://github.com/Magniquick/librespot?rev=ed3215a69531f40d0efb810a0b7bca17308d3dc7#ed3215a69531f40d0efb810a0b7bca17308d3dc7"
+source = "git+https://github.com/Magniquick/librespot?rev=a08d9d38784dcbb8834353c8a577b5b9beeeafa4#a08d9d38784dcbb8834353c8a577b5b9beeeafa4"
 dependencies = [
  "aes 0.8.4",
  "bytes",
@@ -3259,7 +3259,7 @@ dependencies = [
 [[package]]
 name = "librespot-connect"
 version = "0.8.0"
-source = "git+https://github.com/Magniquick/librespot?rev=ed3215a69531f40d0efb810a0b7bca17308d3dc7#ed3215a69531f40d0efb810a0b7bca17308d3dc7"
+source = "git+https://github.com/Magniquick/librespot?rev=a08d9d38784dcbb8834353c8a577b5b9beeeafa4#a08d9d38784dcbb8834353c8a577b5b9beeeafa4"
 dependencies = [
  "futures-util",
  "librespot-core",
@@ -3278,7 +3278,7 @@ dependencies = [
 [[package]]
 name = "librespot-core"
 version = "0.8.0"
-source = "git+https://github.com/Magniquick/librespot?rev=ed3215a69531f40d0efb810a0b7bca17308d3dc7#ed3215a69531f40d0efb810a0b7bca17308d3dc7"
+source = "git+https://github.com/Magniquick/librespot?rev=a08d9d38784dcbb8834353c8a577b5b9beeeafa4#a08d9d38784dcbb8834353c8a577b5b9beeeafa4"
 dependencies = [
  "aes 0.8.4",
  "base64",
@@ -3335,7 +3335,7 @@ dependencies = [
 [[package]]
 name = "librespot-metadata"
 version = "0.8.0"
-source = "git+https://github.com/Magniquick/librespot?rev=ed3215a69531f40d0efb810a0b7bca17308d3dc7#ed3215a69531f40d0efb810a0b7bca17308d3dc7"
+source = "git+https://github.com/Magniquick/librespot?rev=a08d9d38784dcbb8834353c8a577b5b9beeeafa4#a08d9d38784dcbb8834353c8a577b5b9beeeafa4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3352,7 +3352,7 @@ dependencies = [
 [[package]]
 name = "librespot-oauth"
 version = "0.8.0"
-source = "git+https://github.com/Magniquick/librespot?rev=ed3215a69531f40d0efb810a0b7bca17308d3dc7#ed3215a69531f40d0efb810a0b7bca17308d3dc7"
+source = "git+https://github.com/Magniquick/librespot?rev=a08d9d38784dcbb8834353c8a577b5b9beeeafa4#a08d9d38784dcbb8834353c8a577b5b9beeeafa4"
 dependencies = [
  "log",
  "oauth2",
@@ -3365,7 +3365,7 @@ dependencies = [
 [[package]]
 name = "librespot-playback"
 version = "0.8.0"
-source = "git+https://github.com/Magniquick/librespot?rev=ed3215a69531f40d0efb810a0b7bca17308d3dc7#ed3215a69531f40d0efb810a0b7bca17308d3dc7"
+source = "git+https://github.com/Magniquick/librespot?rev=a08d9d38784dcbb8834353c8a577b5b9beeeafa4#a08d9d38784dcbb8834353c8a577b5b9beeeafa4"
 dependencies = [
  "cpal",
  "form_urlencoded",
@@ -3390,7 +3390,7 @@ dependencies = [
 [[package]]
 name = "librespot-protocol"
 version = "0.8.0"
-source = "git+https://github.com/Magniquick/librespot?rev=ed3215a69531f40d0efb810a0b7bca17308d3dc7#ed3215a69531f40d0efb810a0b7bca17308d3dc7"
+source = "git+https://github.com/Magniquick/librespot?rev=a08d9d38784dcbb8834353c8a577b5b9beeeafa4#a08d9d38784dcbb8834353c8a577b5b9beeeafa4"
 dependencies = [
  "protobuf",
  "protobuf-codegen",

@@ -786,6 +786,8 @@ pub enum Event {
         result: Result<(), String>,
     },
     Local(Box<LocalState>),
+    /// Playback on the active Connect device, pushed by Spotify.
+    Remote(Box<crate::player::RemotePlayback>),
     Api(Box<ApiResponse>),
     Accent {
         url: String,
@@ -2527,6 +2529,10 @@ impl Worker {
                 }
                 EngineEvent::SessionEnded => {
                     let _ = commands.send(Command::Reconnect);
+                }
+                EngineEvent::Remote(playback) => {
+                    let _ = events.send(Event::Remote(Box::new(playback)));
+                    waker.wake();
                 }
             }
         })
