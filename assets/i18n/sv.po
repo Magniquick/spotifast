@@ -6,7 +6,7 @@ msgstr ""
 "Project-Id-Version: Spotifast\n"
 "Report-Msgid-Bugs-To: https://github.com/crmne/spotifast/issues/new?"
 "template=translation.yml\n"
-"POT-Creation-Date: 2026-09-26 22:10+0200\n"
+"POT-Creation-Date: 2026-09-27 23:01+0530\n"
 "PO-Revision-Date: 2026-09-09 13:30+0000\n"
 "Last-Translator: Spotifast contributors\n"
 "Language-Team: Swedish\n"
@@ -29,12 +29,12 @@ msgid "Play {name}"
 msgstr "Spela {name}"
 
 #: src/ui/sidebar.rs:289 src/app.rs:2404 src/app.rs:16226
-#: src/ui/collection.rs:1646 src/ui/collection.rs:1823
+#: src/ui/collection.rs:1647 src/ui/collection.rs:1824
 msgid "Playlist"
 msgstr "Spellista"
 
 #: src/ui/sidebar.rs:299 src/app.rs:2378 src/app.rs:16231
-#: src/ui/collection.rs:1816 src/ui/home.rs:49 src/ui/keys.rs:253
+#: src/ui/collection.rs:1817 src/ui/home.rs:49 src/ui/keys.rs:253
 #: src/ui/winamp/playlist.rs:653
 msgid "Liked Songs"
 msgstr "Gillade låtar"
@@ -183,7 +183,7 @@ msgstr[1] "Spellista • {count} låtar"
 #. Translators: Keep {count} exactly as written. It becomes a number of songs.
 #. Translators: Keep {count} exactly as written. It becomes the number of selected songs.
 #. Translators: {count} is a number of songs.
-#: src/i18n.rs:183 src/ui/widgets.rs:530 src/ui/collection.rs:1910
+#: src/i18n.rs:183 src/ui/widgets.rs:530 src/ui/collection.rs:1911
 #, rust-format
 msgid "{count} song"
 msgid_plural "{count} songs"
@@ -480,12 +480,12 @@ msgctxt "artist"
 msgid "Follow"
 msgstr "Följ"
 
-#: src/ui/widgets.rs:990 src/ui/collection.rs:1694 src/ui/collection.rs:1716
+#: src/ui/widgets.rs:990 src/ui/collection.rs:1695 src/ui/collection.rs:1717
 #: src/ui/show.rs:169
 msgid "Remove from Your Library"
 msgstr "Ta bort från Ditt bibliotek"
 
-#: src/ui/widgets.rs:991 src/ui/collection.rs:1693
+#: src/ui/widgets.rs:991 src/ui/collection.rs:1694
 msgid "Add to Your Library"
 msgstr "Lägg till i Ditt bibliotek"
 
@@ -2037,21 +2037,21 @@ msgstr "Dina topplåtar"
 msgid "Your most-played tracks from the last four weeks."
 msgstr "Dina mest spelade låtar de senaste fyra veckorna."
 
-#: src/ui/collection.rs:1642
+#: src/ui/collection.rs:1643
 msgid "Collaborative Playlist"
 msgstr "Gemensam spellista"
 
-#: src/ui/collection.rs:1644
+#: src/ui/collection.rs:1645
 msgid "Public Playlist"
 msgstr "Offentlig spellista"
 
-#: src/ui/collection.rs:1715
+#: src/ui/collection.rs:1716
 msgid "Save to Your Library"
 msgstr "Spara i Ditt bibliotek"
 
 #. Translators: {count} is a number of songs and {duration} their total
 #. length, such as "2 hr 13 min".
-#: src/ui/collection.rs:1923
+#: src/ui/collection.rs:1924
 #, rust-format
 msgid "{count} song, {duration}"
 msgid_plural "{count} songs, {duration}"
@@ -2059,19 +2059,19 @@ msgstr[0] "{count} låt, {duration}"
 msgstr[1] "{count} låtar, {duration}"
 
 #. Translators: {name} is the name of someone who added songs to the playlist.
-#: src/ui/collection.rs:1937
+#: src/ui/collection.rs:1938
 #, rust-format
 msgid "with {name}"
 msgstr "med {name}"
 
 #. Translators: {first} and {second} are names of people who added songs.
-#: src/ui/collection.rs:1941
+#: src/ui/collection.rs:1942
 #, rust-format
 msgid "with {first} and {second}"
 msgstr "med {first} och {second}"
 
 #. Translators: {count} is how many other people added songs to the playlist.
-#: src/ui/collection.rs:1948
+#: src/ui/collection.rs:1949
 #, rust-format
 msgid "and {count} other"
 msgid_plural "and {count} others"

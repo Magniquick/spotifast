@@ -485,6 +485,10 @@ pub struct Playlist {
     pub items_count: Option<TrackCount>,
     #[serde(default)]
     pub external_urls: ExternalUrls,
+    /// A Blend: Spotify makes it from its members' listening and attributes
+    /// each song to a member. Only the session read knows.
+    #[serde(default)]
+    pub blend: bool,
 }
 
 impl Playlist {
