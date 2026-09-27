@@ -122,6 +122,8 @@ AUR and Homebrew packages now use the Spotifast name. See [rename compatibility]
   insert it there. This adds a copy and leaves playback and the queue unchanged.
   Clear the playlist’s filter and sort to choose an insertion position.
   Drop it on an empty playlist to add its first song.
+  A Blend shows which member each song came from, as a playlist made
+  together does.
   A playlist a friend shared with you takes songs too,
   as Spotify's own apps allow. Filter the **Add to playlist** menu by name to
   find the destination quickly: `Enter` adds to the first match, and the

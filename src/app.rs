@@ -30,6 +30,10 @@ use crate::util;
 
 const REMOTE_POLL_ACTIVE: Duration = Duration::from_secs(4);
 const REMOTE_POLL_IDLE: Duration = Duration::from_secs(20);
+/// A failed user lookup (usually a rate limit) is asked again after this,
+/// times the failures so far.
+const USER_LOOKUP_RETRY: Duration = Duration::from_secs(60);
+const USER_LOOKUP_ATTEMPTS: u8 = 5;
 const REMOTE_FRESH: Duration = Duration::from_secs(45);
 const DEVICES_FRESH: Duration = Duration::from_secs(12);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(280);
@@ -518,6 +522,11 @@ pub struct App {
     /// User ids resolved to display names; `None` while unknown, so an id
     /// is asked about only once per run.
     pub user_names: HashMap<String, Option<String>>,
+    /// Profile pictures of the same users, when they have one.
+    pub user_images: HashMap<String, Option<String>>,
+    /// Users whose lookup failed, how many times, and when to ask again.
+    user_lookup_failures: HashMap<String, u8>,
+    user_lookup_retry_at: Option<Instant>,
     pub user_names_revision: u64,
     /// Context URIs most recently played, newest first: the sidebar's
     /// order. Kept with the session, so it survives a restart.
@@ -939,6 +948,9 @@ impl App {
                 .filter_map(|(page, sort)| Some((Page::decode(page)?, *sort)))
                 .collect(),
             user_names: HashMap::new(),
+            user_images: HashMap::new(),
+            user_lookup_failures: HashMap::new(),
+            user_lookup_retry_at: None,
             user_names_revision: 0,
             recent_contexts: session.recent_contexts.clone(),
             resume_context: session.last_context.clone(),
@@ -1599,6 +1611,16 @@ impl App {
         self.pending_fresh() && self.pending_play_keys.iter().any(|k| k == key)
     }
 
+    /// A user's name and picture, however they became known.
+    fn remember_user(&mut self, id: String, name: Option<String>, image: Option<String>) {
+        self.user_lookup_failures.remove(&id);
+        if self.user_images.get(&id) != Some(&image) {
+            self.user_images.insert(id.clone(), image);
+            self.user_names_revision = self.user_names_revision.wrapping_add(1);
+        }
+        self.set_user_name(id, name);
+    }
+
     pub fn set_user_name(&mut self, id: String, name: Option<String>) {
         if self.user_names.get(&id) != Some(&name) {
             self.user_names.insert(id, name);
@@ -1953,9 +1975,20 @@ impl App {
                 } => {
                     self.receive_liked_cache(&account_id, generation, cache);
                 }
-                Event::UserName { id, name } => {
-                    self.set_user_name(id, name);
+                Event::UserNameFailed { id } => {
+                    // Not known after all: asked again after a pause that
+                    // grows with each failure, a few times at most.
+                    self.user_names.remove(&id);
+                    let failures = self.user_lookup_failures.entry(id).or_insert(0);
+                    *failures = failures.saturating_add(1);
+                    if *failures <= USER_LOOKUP_ATTEMPTS {
+                        let wait = USER_LOOKUP_RETRY * u32::from(*failures);
+                        let due = Instant::now() + wait;
+                        self.user_lookup_retry_at =
+                            Some(self.user_lookup_retry_at.map_or(due, |at| at.min(due)));
+                    }
                 }
+                Event::UserName { id, name, image } => self.remember_user(id, name, image),
                 Event::AudiobookShows(uris) => {
                     self.audiobook_shows.extend(uris);
                 }
@@ -2726,6 +2759,19 @@ impl App {
 
     fn tick(&mut self, ctx: &egui::Context) {
         self.poll_custom_themes(ctx);
+        if self
+            .user_lookup_retry_at
+            .is_some_and(|at| Instant::now() >= at)
+        {
+            self.user_lookup_retry_at = None;
+            let retry: Vec<String> = self
+                .user_lookup_failures
+                .iter()
+                .filter(|(_, failures)| **failures <= USER_LOOKUP_ATTEMPTS)
+                .map(|(id, _)| id.clone())
+                .collect();
+            self.request_user_names(retry);
+        }
         let now = Instant::now();
         if self.winamp_level_reassert > 0 {
             self.winamp_level_reassert -= 1;
@@ -4823,6 +4869,12 @@ impl App {
                             .unwrap_or_default();
                         self.editable_by_grant.clear();
                     }
+                    // Known without a lookup: the account signed in.
+                    self.remember_user(
+                        user.id.clone(),
+                        user.display_name.clone(),
+                        user.images.first().map(|image| image.url.clone()),
+                    );
                     self.user = Some(user);
                     let page = self.page().clone();
                     self.ensure_loaded(page);
@@ -5215,6 +5267,13 @@ impl App {
                 generation,
                 mut result,
             } => {
+                // A Blend names its members, however current the rest of the
+                // answer is: no lookups for them.
+                if let Ok(playlist) = &result {
+                    for member in playlist.members.clone() {
+                        self.remember_user(member.id, Some(member.name), member.image);
+                    }
+                }
                 if self
                     .playlist_pages
                     .get(&id)
@@ -15013,6 +15072,74 @@ mod tests {
         );
         app.reveal_theme_changes = false;
         app
+    }
+
+    #[test]
+    fn a_blend_s_members_need_no_lookup() {
+        let mut app = test_app("blend-members");
+        app.open(Page::Playlist("blend".into()));
+        let generation = app
+            .playlist_pages
+            .get("blend")
+            .map_or(0, |page| page.generation);
+        app.handle_api(ApiResponse::Playlist {
+            id: "blend".into(),
+            generation,
+            result: Ok(crate::api::models::Playlist {
+                id: "blend".into(),
+                members: vec![crate::api::models::KnownUser {
+                    id: "friend".into(),
+                    name: "Srijita".into(),
+                    image: Some("https://i.scdn.co/image/f".into()),
+                }],
+                ..Default::default()
+            }),
+        });
+        assert_eq!(app.user_names.get("friend"), Some(&Some("Srijita".into())));
+        assert_eq!(
+            app.user_images.get("friend"),
+            Some(&Some("https://i.scdn.co/image/f".into()))
+        );
+        app.request_user_names(vec!["friend".into()]);
+        assert_eq!(
+            app.user_names.get("friend"),
+            Some(&Some("Srijita".into())),
+            "a known member is not looked up again"
+        );
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn a_failed_user_lookup_is_asked_again_later() {
+        let ctx = egui::Context::default();
+        let mut app = test_app("user-lookup-retry");
+        app.request_user_names(vec!["friend".into()]);
+        app.handle_backend_events(vec![Event::UserNameFailed {
+            id: "friend".into(),
+        }]);
+        assert!(
+            !app.user_names.contains_key("friend"),
+            "a failed lookup is not remembered as a user without a name"
+        );
+        assert!(app.user_lookup_retry_at.is_some());
+        app.user_lookup_retry_at = Some(Instant::now() - Duration::from_millis(1));
+        app.tick(&ctx);
+        assert_eq!(
+            app.user_names.get("friend"),
+            Some(&None),
+            "asked again once the pause is over"
+        );
+        app.handle_backend_events(vec![Event::UserName {
+            id: "friend".into(),
+            name: Some("Friend".into()),
+            image: Some("https://i.scdn.co/image/f".into()),
+        }]);
+        assert!(app.user_lookup_failures.is_empty());
+        assert_eq!(
+            app.user_images.get("friend"),
+            Some(&Some("https://i.scdn.co/image/f".into()))
+        );
+        app.backend.shutdown();
     }
 
     /// With Random on, each switch to the mini player shows a skin other

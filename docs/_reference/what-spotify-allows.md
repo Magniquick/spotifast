@@ -64,7 +64,10 @@ clients. Spotifast uses its session for:
   cache. A song the session reads first has unknown availability; if it cannot
   play, it is skipped when reached, as it would be anywhere else.
 - **Lyrics** when Spotify has them.
-- **Display names** for the user IDs attached to songs in a playlist.
+- **Display names and profile pictures** for the user IDs attached to songs
+  in a playlist, one request per user. A Blend names its members itself and
+  the signed-in account is already known, so neither is looked up. A lookup
+  refused for a rate limit is tried again later.
 - **Precise EP types** for releases that the Web API groups with singles.
 - **Radio and autoplay** through Spotify's context resolver: stations seeded
   by a song, playlist, album, or artist. Each resolution is a fresh mix of 50

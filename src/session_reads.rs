@@ -74,7 +74,7 @@ pub async fn playlist(session: &Session, id: &str) -> Result<Playlist, Failure> 
     // lists and as the id for anyone else's, until the app finds the name
     // where the Web API gave it: the account's own, or the library list.
     if let Some(owner) = playlist.owner.id.clone().filter(|owner| owner != "spotify") {
-        playlist.owner.display_name = user_display_name(session, &owner).await;
+        playlist.owner.display_name = user_profile(session, &owner).await.ok().and_then(|p| p.0);
     }
     Ok(playlist)
 }
@@ -248,16 +248,31 @@ fn audiobooks_in(response: &BatchedExtensionResponse) -> Vec<String> {
 
 /// The display name behind a user id, from the profile view Spotify's
 /// clients read; `None` when nothing answers.
-pub async fn user_display_name(session: &Session, user_id: &str) -> Option<String> {
+/// A user's display name and profile picture, from one profile request; an
+/// error when the request failed, which is worth trying again.
+pub async fn user_profile(
+    session: &Session,
+    user_id: &str,
+) -> Result<(Option<String>, Option<String>), librespot_core::Error> {
     let bytes = session
         .spclient()
         .get_user_profile(user_id, Some(0), Some(0))
-        .await
-        .ok()?;
-    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    json.get("name")
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
+        .await?;
+    Ok(serde_json::from_slice::<serde_json::Value>(&bytes)
+        .map(|json| profile_fields(&json))
+        .unwrap_or_default())
+}
+
+/// The name and picture in a user-profile answer; `image_url` is null for a
+/// user without one.
+fn profile_fields(json: &serde_json::Value) -> (Option<String>, Option<String>) {
+    let text = |key: &str| {
+        json.get(key)
+            .and_then(|value| value.as_str())
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    (text("name"), text("image_url"))
 }
 
 /// The list's header and the `length` rows from `from`; none for the header
@@ -307,10 +322,35 @@ fn header(id: &str, list: &SessionPlaylist) -> Playlist {
             display_name: None,
         },
         collaborative: attributes.is_collaborative,
+        blend: attributes.format == "blend",
+        members: blend_members(&attributes.format_attributes),
         snapshot_id: Some(snapshot(&list.revision)),
         items_count: Some(TrackCount { total: total(list) }),
         ..Default::default()
     }
+}
+
+/// Users a playlist names in its format attributes, as
+/// `<kind>.userinfo-<id>.name` and `.profileimage` (a Blend's members).
+fn blend_members(attributes: &HashMap<String, String>) -> Vec<crate::api::models::KnownUser> {
+    let mut members: Vec<_> = attributes
+        .iter()
+        .filter_map(|(key, name)| {
+            let (kind, rest) = key.split_once("userinfo-")?;
+            let id = rest.strip_suffix(".name")?;
+            Some(crate::api::models::KnownUser {
+                id: id.to_string(),
+                name: name.clone(),
+                image: attributes
+                    .get(&format!("{kind}userinfo-{id}.profileimage"))
+                    .filter(|image| !image.is_empty())
+                    .cloned(),
+            })
+        })
+        .filter(|member| !member.id.is_empty() && !member.name.is_empty())
+        .collect();
+    members.sort_by(|a, b| a.id.cmp(&b.id));
+    members
 }
 
 /// The Web API's snapshot id is the playlist revision in base64, so a
@@ -732,6 +772,87 @@ mod tests {
         assert_eq!(playlist.track_total(), 3);
         assert_eq!(playlist.snapshot_id.as_deref(), Some("AAAABw"));
         assert!(playlist.images[0].url.starts_with(IMAGE_HOST));
+        assert!(!playlist.blend);
+
+        // A Blend says so in its format; its songs are its members' additions.
+        let mut blend = SelectedListContent::new();
+        blend.set_owner_username("spotify".into());
+        blend
+            .attributes
+            .mut_or_insert_default()
+            .set_format("blend".into());
+        let blend = header(
+            "pl3",
+            &SessionPlaylist::parse(&blend, &playlist_uri()).unwrap(),
+        );
+        assert!(blend.blend);
+    }
+
+    #[test]
+    fn a_blend_names_its_members() {
+        let attributes = HashMap::from([
+            ("blend.userinfo-me.username".to_string(), "me".to_string()),
+            (
+                "blend.userinfo-me.name".to_string(),
+                "Magniquick".to_string(),
+            ),
+            (
+                "blend.userinfo-me.profileimage".to_string(),
+                "https://i.scdn.co/image/me".to_string(),
+            ),
+            (
+                "blend.userinfo-friend.name".to_string(),
+                "Srijita".to_string(),
+            ),
+            (
+                "blend.userinfo-friend.profileimage".to_string(),
+                String::new(),
+            ),
+            (
+                "track_attributed_desc".to_string(),
+                "Listened to this song".to_string(),
+            ),
+            // Not only Blends: any kind of list naming a user counts.
+            ("jam.userinfo-guest.name".to_string(), "Guest".to_string()),
+        ]);
+        let members = blend_members(&attributes);
+        assert_eq!(
+            members,
+            vec![
+                crate::api::models::KnownUser {
+                    id: "friend".into(),
+                    name: "Srijita".into(),
+                    image: None,
+                },
+                crate::api::models::KnownUser {
+                    id: "guest".into(),
+                    name: "Guest".into(),
+                    image: None,
+                },
+                crate::api::models::KnownUser {
+                    id: "me".into(),
+                    name: "Magniquick".into(),
+                    image: Some("https://i.scdn.co/image/me".into()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_profile_gives_a_name_and_maybe_a_picture() {
+        let with = serde_json::json!({
+            "name": "Magniquick",
+            "image_url": "https://i.scdn.co/image/ab67757000",
+        });
+        assert_eq!(
+            profile_fields(&with),
+            (
+                Some("Magniquick".into()),
+                Some("https://i.scdn.co/image/ab67757000".into())
+            )
+        );
+        let without = serde_json::json!({ "name": "Srijita", "image_url": null });
+        assert_eq!(profile_fields(&without), (Some("Srijita".into()), None));
     }
 
     #[test]

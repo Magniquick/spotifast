@@ -7,7 +7,14 @@ use std::time::Instant;
 use crate::api::models::*;
 
 /// One table row: the playable, when it was added, who added it.
-pub type TableItem = (PlayableItem, Option<String>, Option<String>);
+pub type TableItem = (PlayableItem, Option<String>, Option<Adder>);
+
+/// Who added a playlist row: the name shown, and their profile picture.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Adder {
+    pub name: String,
+    pub image: Option<String>,
+}
 
 /// Cached track-table rows for one page.
 ///
@@ -46,7 +53,9 @@ impl TableRowsCache {
                 .map(|(item, added, by)| {
                     playable_retained_bytes(item)
                         + added.as_ref().map(String::len).unwrap_or(0)
-                        + by.as_ref().map(String::len).unwrap_or(0)
+                        + by.as_ref().map_or(0, |by| {
+                            by.name.len() + by.image.as_ref().map_or(0, String::len)
+                        })
                 })
                 .sum::<usize>()
     }
