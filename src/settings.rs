@@ -1551,6 +1551,21 @@ pub struct SessionState {
     /// start returns it to this mode instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lyrics_fullscreen_from: Option<WindowMode>,
+    /// Users seen before, with their names and pictures, reused for a while
+    /// so collaborators aren't looked up again on every start.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub known_users: Vec<CachedUser>,
+}
+
+/// A user's name and picture, and when they were last learned.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CachedUser {
+    pub id: String,
+    pub name: Option<String>,
+    pub image: Option<String>,
+    /// Seconds since the Unix epoch.
+    pub seen_at: u64,
 }
 
 /// Whether a window was full screen, and whether it was maximized.

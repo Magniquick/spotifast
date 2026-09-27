@@ -330,18 +330,19 @@ fn header(id: &str, list: &SessionPlaylist) -> Playlist {
     }
 }
 
-/// A Blend names its members in its format attributes, as
-/// `blend.userinfo-<id>.name` and `.profileimage`.
+/// Users a playlist names in its format attributes, as
+/// `<kind>.userinfo-<id>.name` and `.profileimage` (a Blend's members).
 fn blend_members(attributes: &HashMap<String, String>) -> Vec<crate::api::models::KnownUser> {
     let mut members: Vec<_> = attributes
         .iter()
         .filter_map(|(key, name)| {
-            let id = key.strip_prefix("blend.userinfo-")?.strip_suffix(".name")?;
+            let (kind, rest) = key.split_once("userinfo-")?;
+            let id = rest.strip_suffix(".name")?;
             Some(crate::api::models::KnownUser {
                 id: id.to_string(),
                 name: name.clone(),
                 image: attributes
-                    .get(&format!("blend.userinfo-{id}.profileimage"))
+                    .get(&format!("{kind}userinfo-{id}.profileimage"))
                     .filter(|image| !image.is_empty())
                     .cloned(),
             })
@@ -811,6 +812,8 @@ mod tests {
                 "track_attributed_desc".to_string(),
                 "Listened to this song".to_string(),
             ),
+            // Not only Blends: any kind of list naming a user counts.
+            ("jam.userinfo-guest.name".to_string(), "Guest".to_string()),
         ]);
         let members = blend_members(&attributes);
         assert_eq!(
@@ -819,6 +822,11 @@ mod tests {
                 crate::api::models::KnownUser {
                     id: "friend".into(),
                     name: "Srijita".into(),
+                    image: None,
+                },
+                crate::api::models::KnownUser {
+                    id: "guest".into(),
+                    name: "Guest".into(),
                     image: None,
                 },
                 crate::api::models::KnownUser {
