@@ -1071,7 +1071,7 @@ pub struct TrackRow<'a> {
     pub show_album: bool,
     pub added_at: Option<&'a str>,
     /// Who put the song here, on playlists made together.
-    pub added_by: Option<&'a str>,
+    pub added_by: Option<&'a crate::model::Adder>,
     pub show_added_by: bool,
     pub compact: bool,
     /// One line for the name and the artists in a shorter row without the
@@ -1615,8 +1615,22 @@ fn track_row_contents(
     // Added by.
     if cols.added_by > 0.0 {
         if let Some(adder) = row.added_by {
+            const AVATAR: f32 = 22.0;
+            let avatar = Rect::from_center_size(
+                pos2(x + AVATAR / 2.0, rect.center().y),
+                Vec2::splat(AVATAR),
+            );
+            paint_cover(
+                ui,
+                &palette,
+                adder.image.as_deref(),
+                avatar,
+                AVATAR / 2.0,
+                Icon::User,
+                Some(app.backend.art()),
+            );
             let cell = Rect::from_min_max(
-                pos2(x, rect.top()),
+                pos2(avatar.right() + 8.0, rect.top()),
                 pos2(x + cols.added_by - 12.0, rect.bottom()),
             );
             let clipped = painter.with_clip_rect(cell.intersect(ui.clip_rect()));
@@ -1625,7 +1639,7 @@ fn track_row_contents(
                 cell.left(),
                 cell.right(),
                 cell.center().y,
-                adder,
+                &adder.name,
                 theme::regular(13.0),
                 palette.secondary,
             );
