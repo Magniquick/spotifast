@@ -30,10 +30,20 @@ use crate::util;
 
 const REMOTE_POLL_ACTIVE: Duration = Duration::from_secs(4);
 const REMOTE_POLL_IDLE: Duration = Duration::from_secs(20);
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
 /// A failed user lookup (usually a rate limit) is asked again after this,
 /// times the failures so far.
 const USER_LOOKUP_RETRY: Duration = Duration::from_secs(60);
 const USER_LOOKUP_ATTEMPTS: u8 = 5;
+/// How long a user's name and picture are reused before being looked up again.
+const USER_CACHE_SECS: u64 = 7 * 24 * 60 * 60;
+/// How many users the session remembers.
+const USER_CACHE_LIMIT: usize = 500;
 const REMOTE_FRESH: Duration = Duration::from_secs(45);
 const DEVICES_FRESH: Duration = Duration::from_secs(12);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(280);
@@ -526,6 +536,8 @@ pub struct App {
     pub user_images: HashMap<String, Option<String>>,
     /// Users whose lookup failed, how many times, and when to ask again.
     user_lookup_failures: HashMap<String, u8>,
+    /// When each known user's name and picture were learned (Unix seconds).
+    user_seen_at: HashMap<String, u64>,
     user_lookup_retry_at: Option<Instant>,
     pub user_names_revision: u64,
     /// Context URIs most recently played, newest first: the sidebar's
@@ -724,6 +736,12 @@ impl App {
             applied_proxy
         };
         let session = SessionState::load(&dirs.session_file());
+        let known_users: Vec<_> = session
+            .known_users
+            .iter()
+            .filter(|user| unix_seconds().saturating_sub(user.seen_at) < USER_CACHE_SECS)
+            .cloned()
+            .collect();
         let wake = waker.clone();
         let media_controls = options
             .media_controls
@@ -947,9 +965,19 @@ impl App {
                 .iter()
                 .filter_map(|(page, sort)| Some((Page::decode(page)?, *sort)))
                 .collect(),
-            user_names: HashMap::new(),
-            user_images: HashMap::new(),
+            user_names: known_users
+                .iter()
+                .map(|user| (user.id.clone(), user.name.clone()))
+                .collect(),
+            user_images: known_users
+                .iter()
+                .map(|user| (user.id.clone(), user.image.clone()))
+                .collect(),
             user_lookup_failures: HashMap::new(),
+            user_seen_at: known_users
+                .iter()
+                .map(|user| (user.id.clone(), user.seen_at))
+                .collect(),
             user_lookup_retry_at: None,
             user_names_revision: 0,
             recent_contexts: session.recent_contexts.clone(),
@@ -1614,6 +1642,8 @@ impl App {
     /// A user's name and picture, however they became known.
     fn remember_user(&mut self, id: String, name: Option<String>, image: Option<String>) {
         self.user_lookup_failures.remove(&id);
+        self.user_seen_at.insert(id.clone(), unix_seconds());
+        self.session_dirty = true;
         if self.user_images.get(&id) != Some(&image) {
             self.user_images.insert(id.clone(), image);
             self.user_names_revision = self.user_names_revision.wrapping_add(1);
@@ -10051,9 +10081,31 @@ impl App {
                         maximized: self.lyrics_restore_maximized,
                     }
                 }),
+                known_users: self.known_users_to_save(),
             }
             .save(&self.dirs.session_file());
         }
+    }
+
+    /// The users worth remembering: the most recently learned, still fresh.
+    fn known_users_to_save(&self) -> Vec<crate::settings::CachedUser> {
+        let now = unix_seconds();
+        let mut users: Vec<_> = self
+            .user_seen_at
+            .iter()
+            .filter(|(_, seen_at)| now.saturating_sub(**seen_at) < USER_CACHE_SECS)
+            .filter_map(|(id, seen_at)| {
+                Some(crate::settings::CachedUser {
+                    id: id.clone(),
+                    name: self.user_names.get(id)?.clone(),
+                    image: self.user_images.get(id).cloned().flatten(),
+                    seen_at: *seen_at,
+                })
+            })
+            .collect();
+        users.sort_by(|a, b| b.seen_at.cmp(&a.seen_at).then_with(|| a.id.cmp(&b.id)));
+        users.truncate(USER_CACHE_LIMIT);
+        users
     }
 
     /// Final teardown at real quit.
@@ -15108,6 +15160,26 @@ mod tests {
             Some(&Some("Srijita".into())),
             "a known member is not looked up again"
         );
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn known_users_are_remembered_for_a_week() {
+        let mut app = test_app("known-users");
+        app.handle_backend_events(vec![Event::UserName {
+            id: "friend".into(),
+            name: Some("Friend".into()),
+            image: Some("https://i.scdn.co/image/f".into()),
+        }]);
+        app.user_names.insert("old".into(), Some("Old".into()));
+        app.user_seen_at
+            .insert("old".into(), unix_seconds() - USER_CACHE_SECS - 1);
+        let saved = app.known_users_to_save();
+        assert_eq!(saved.len(), 1, "a user learned over a week ago is dropped");
+        assert_eq!(saved[0].id, "friend");
+        assert_eq!(saved[0].name.as_deref(), Some("Friend"));
+        assert_eq!(saved[0].image.as_deref(), Some("https://i.scdn.co/image/f"));
+        assert!(app.session_dirty, "learning a user saves the session");
         app.backend.shutdown();
     }
 
