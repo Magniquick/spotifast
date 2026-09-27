@@ -323,10 +323,33 @@ fn header(id: &str, list: &SessionPlaylist) -> Playlist {
         },
         collaborative: attributes.is_collaborative,
         blend: attributes.format == "blend",
+        members: blend_members(&attributes.format_attributes),
         snapshot_id: Some(snapshot(&list.revision)),
         items_count: Some(TrackCount { total: total(list) }),
         ..Default::default()
     }
+}
+
+/// A Blend names its members in its format attributes, as
+/// `blend.userinfo-<id>.name` and `.profileimage`.
+fn blend_members(attributes: &HashMap<String, String>) -> Vec<crate::api::models::KnownUser> {
+    let mut members: Vec<_> = attributes
+        .iter()
+        .filter_map(|(key, name)| {
+            let id = key.strip_prefix("blend.userinfo-")?.strip_suffix(".name")?;
+            Some(crate::api::models::KnownUser {
+                id: id.to_string(),
+                name: name.clone(),
+                image: attributes
+                    .get(&format!("blend.userinfo-{id}.profileimage"))
+                    .filter(|image| !image.is_empty())
+                    .cloned(),
+            })
+        })
+        .filter(|member| !member.id.is_empty() && !member.name.is_empty())
+        .collect();
+    members.sort_by(|a, b| a.id.cmp(&b.id));
+    members
 }
 
 /// The Web API's snapshot id is the playlist revision in base64, so a
@@ -762,6 +785,49 @@ mod tests {
             &SessionPlaylist::parse(&blend, &playlist_uri()).unwrap(),
         );
         assert!(blend.blend);
+    }
+
+    #[test]
+    fn a_blend_names_its_members() {
+        let attributes = HashMap::from([
+            ("blend.userinfo-me.username".to_string(), "me".to_string()),
+            (
+                "blend.userinfo-me.name".to_string(),
+                "Magniquick".to_string(),
+            ),
+            (
+                "blend.userinfo-me.profileimage".to_string(),
+                "https://i.scdn.co/image/me".to_string(),
+            ),
+            (
+                "blend.userinfo-friend.name".to_string(),
+                "Srijita".to_string(),
+            ),
+            (
+                "blend.userinfo-friend.profileimage".to_string(),
+                String::new(),
+            ),
+            (
+                "track_attributed_desc".to_string(),
+                "Listened to this song".to_string(),
+            ),
+        ]);
+        let members = blend_members(&attributes);
+        assert_eq!(
+            members,
+            vec![
+                crate::api::models::KnownUser {
+                    id: "friend".into(),
+                    name: "Srijita".into(),
+                    image: None,
+                },
+                crate::api::models::KnownUser {
+                    id: "me".into(),
+                    name: "Magniquick".into(),
+                    image: Some("https://i.scdn.co/image/me".into()),
+                },
+            ]
+        );
     }
 
     #[test]
