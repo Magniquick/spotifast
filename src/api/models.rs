@@ -485,6 +485,18 @@ pub struct Playlist {
     pub items_count: Option<TrackCount>,
     #[serde(default)]
     pub external_urls: ExternalUrls,
+    /// Users the playlist itself names, with their pictures: a Blend's
+    /// members. Only the session read knows them.
+    #[serde(default)]
+    pub members: Vec<KnownUser>,
+}
+
+/// A user known without looking them up.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct KnownUser {
+    pub id: String,
+    pub name: String,
+    pub image: Option<String>,
 }
 
 impl Playlist {
