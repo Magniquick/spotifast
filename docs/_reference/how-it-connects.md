@@ -325,6 +325,13 @@ device waits for a switch back to this computer, which can't be recalled, and
 for any playback command still on its way. Queue changes are refused until the
 switch settles.
 
+While local playback is set up, Spotifast learns what plays on another device
+from the updates Spotify pushes to it over Connect, so a pause, seek, shuffle or
+repeat change there shows at once, with no request. A new song or device is
+looked up at once through the Web API, which is otherwise asked only every 30
+seconds as a fallback. Without local playback it is asked every 4 seconds while
+another device plays.
+
 When the PulseAudio backend is selected on Linux, its PulseAudio or PipeWire
 stream is named **Spotifast**, with **Spotify playback** as its description, so
 system mixers and audio processors can identify and route it. Explicit
