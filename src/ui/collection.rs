@@ -1441,7 +1441,10 @@ pub fn playlist(app: &mut App, ui: &mut egui::Ui, id: &str) {
                     },
                     show_album: true,
                     show_cover: true,
-                    show_added: true,
+                    // Spotify's own mixes carry no dates: no column for them,
+                    // or the header and the rows disagree about where the
+                    // album column sits.
+                    show_added: items.iter().any(|(_, added_at, _)| added_at.is_some()),
                     show_added_by: made_together,
                     page: Page::Playlist(id.to_string()),
                     loading: page.items.loading,
