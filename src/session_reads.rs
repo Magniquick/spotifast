@@ -74,7 +74,7 @@ pub async fn playlist(session: &Session, id: &str) -> Result<Playlist, Failure> 
     // lists and as the id for anyone else's, until the app finds the name
     // where the Web API gave it: the account's own, or the library list.
     if let Some(owner) = playlist.owner.id.clone().filter(|owner| owner != "spotify") {
-        playlist.owner.display_name = user_profile(session, &owner).await.0;
+        playlist.owner.display_name = user_profile(session, &owner).await.ok().and_then(|p| p.0);
     }
     Ok(playlist)
 }
@@ -248,18 +248,19 @@ fn audiobooks_in(response: &BatchedExtensionResponse) -> Vec<String> {
 
 /// The display name behind a user id, from the profile view Spotify's
 /// clients read; `None` when nothing answers.
-/// A user's display name and profile picture, from one profile request.
-pub async fn user_profile(session: &Session, user_id: &str) -> (Option<String>, Option<String>) {
-    let Some(json) = session
+/// A user's display name and profile picture, from one profile request; an
+/// error when the request failed, which is worth trying again.
+pub async fn user_profile(
+    session: &Session,
+    user_id: &str,
+) -> Result<(Option<String>, Option<String>), librespot_core::Error> {
+    let bytes = session
         .spclient()
         .get_user_profile(user_id, Some(0), Some(0))
-        .await
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-    else {
-        return (None, None);
-    };
-    profile_fields(&json)
+        .await?;
+    Ok(serde_json::from_slice::<serde_json::Value>(&bytes)
+        .map(|json| profile_fields(&json))
+        .unwrap_or_default())
 }
 
 /// The name and picture in a user-profile answer; `image_url` is null for a
