@@ -823,10 +823,12 @@ pub enum Event {
         snapshot: String,
         success: bool,
     },
-    /// A user id resolved to a display name (`None` when nothing answers).
+    /// A user id resolved to a display name and profile picture (`None`
+    /// when nothing answers or there is none).
     UserName {
         id: String,
         name: Option<String>,
+        image: Option<String>,
     },
     /// Saved shows that Spotify's metadata marks as audiobooks. librespot
     /// cannot play them, so the Podcasts shelf leaves them out.
@@ -3213,8 +3215,8 @@ impl Worker {
         let waker = self.waker.clone();
         tokio::spawn(async move {
             for id in ids {
-                let name = session_reads::user_display_name(engine.session(), &id).await;
-                let _ = events.send(Event::UserName { id, name });
+                let (name, image) = session_reads::user_profile(engine.session(), &id).await;
+                let _ = events.send(Event::UserName { id, name, image });
                 waker.wake();
             }
         });

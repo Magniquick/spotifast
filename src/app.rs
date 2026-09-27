@@ -589,6 +589,8 @@ pub struct App {
     /// User ids resolved to display names; `None` while unknown, so an id
     /// is asked about only once per run.
     pub user_names: HashMap<String, Option<String>>,
+    /// Profile pictures of the same users, when they have one.
+    pub user_images: HashMap<String, Option<String>>,
     pub user_names_revision: u64,
     /// Context URIs most recently played, newest first: the sidebar's
     /// order. Kept with the session, so it survives a restart.
@@ -1022,6 +1024,7 @@ impl App {
                 .filter_map(|(page, sort)| Some((Page::decode(page)?, *sort)))
                 .collect(),
             user_names: HashMap::new(),
+            user_images: HashMap::new(),
             user_names_revision: 0,
             recent_contexts: session.recent_contexts.clone(),
             resume_context: session.last_context.clone(),
@@ -2046,7 +2049,11 @@ impl App {
                 } => {
                     self.receive_liked_cache(&account_id, generation, cache);
                 }
-                Event::UserName { id, name } => {
+                Event::UserName { id, name, image } => {
+                    if self.user_images.get(&id) != Some(&image) {
+                        self.user_images.insert(id.clone(), image);
+                        self.user_names_revision = self.user_names_revision.wrapping_add(1);
+                    }
                     self.set_user_name(id, name);
                 }
                 Event::AudiobookShows(uris) => {

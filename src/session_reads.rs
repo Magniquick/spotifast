@@ -74,7 +74,7 @@ pub async fn playlist(session: &Session, id: &str) -> Result<Playlist, Failure> 
     // lists and as the id for anyone else's, until the app finds the name
     // where the Web API gave it: the account's own, or the library list.
     if let Some(owner) = playlist.owner.id.clone().filter(|owner| owner != "spotify") {
-        playlist.owner.display_name = user_display_name(session, &owner).await;
+        playlist.owner.display_name = user_profile(session, &owner).await.0;
     }
     Ok(playlist)
 }
@@ -248,16 +248,30 @@ fn audiobooks_in(response: &BatchedExtensionResponse) -> Vec<String> {
 
 /// The display name behind a user id, from the profile view Spotify's
 /// clients read; `None` when nothing answers.
-pub async fn user_display_name(session: &Session, user_id: &str) -> Option<String> {
-    let bytes = session
+/// A user's display name and profile picture, from one profile request.
+pub async fn user_profile(session: &Session, user_id: &str) -> (Option<String>, Option<String>) {
+    let Some(json) = session
         .spclient()
         .get_user_profile(user_id, Some(0), Some(0))
         .await
-        .ok()?;
-    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    json.get("name")
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    else {
+        return (None, None);
+    };
+    profile_fields(&json)
+}
+
+/// The name and picture in a user-profile answer; `image_url` is null for a
+/// user without one.
+fn profile_fields(json: &serde_json::Value) -> (Option<String>, Option<String>) {
+    let text = |key: &str| {
+        json.get(key)
+            .and_then(|value| value.as_str())
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    (text("name"), text("image_url"))
 }
 
 /// The list's header and the `length` rows from `from`; none for the header
@@ -747,6 +761,23 @@ mod tests {
             &SessionPlaylist::parse(&blend, &playlist_uri()).unwrap(),
         );
         assert!(blend.blend);
+    }
+
+    #[test]
+    fn a_profile_gives_a_name_and_maybe_a_picture() {
+        let with = serde_json::json!({
+            "name": "Magniquick",
+            "image_url": "https://i.scdn.co/image/ab67757000",
+        });
+        assert_eq!(
+            profile_fields(&with),
+            (
+                Some("Magniquick".into()),
+                Some("https://i.scdn.co/image/ab67757000".into())
+            )
+        );
+        let without = serde_json::json!({ "name": "Srijita", "image_url": null });
+        assert_eq!(profile_fields(&without), (Some("Srijita".into()), None));
     }
 
     #[test]

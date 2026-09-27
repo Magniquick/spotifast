@@ -774,7 +774,7 @@ pub fn table(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
                 show_cover,
                 show_album: table.show_album,
                 added_at: added_at.as_deref(),
-                added_by: added_by.as_deref(),
+                added_by: added_by.as_ref(),
                 show_added_by: table.show_added_by,
                 compact: false,
                 thin,
@@ -1084,7 +1084,10 @@ fn view_indices(items: &[TableItem], needle: &str, sort: Option<TableSort>) -> V
                 })
             }
             SortColumn::AddedBy => sort_by_text_key(&mut visible, sort.ascending, |index| {
-                items[index].2.as_deref().unwrap_or_default().to_lowercase()
+                items[index]
+                    .2
+                    .as_ref()
+                    .map_or(String::new(), |by| by.name.to_lowercase())
             }),
             SortColumn::Added | SortColumn::Index | SortColumn::Duration => {
                 visible.sort_by(|a, b| {
@@ -1121,6 +1124,7 @@ fn playlist_rows(
     owner_id: Option<&str>,
     owner_name: &str,
     names: &std::collections::HashMap<String, Option<String>>,
+    images: &std::collections::HashMap<String, Option<String>>,
 ) -> (Vec<TableItem>, Vec<usize>, u64) {
     let mut rows = Vec::new();
     let mut positions = Vec::new();
@@ -1135,15 +1139,16 @@ fn playlist_rows(
                 .added_by
                 .as_ref()
                 .and_then(|user| user.id.as_deref())
-                .map(|id| {
-                    if Some(id) == owner_id {
+                .map(|id| crate::model::Adder {
+                    name: if Some(id) == owner_id {
                         owner_name.to_string()
                     } else {
                         names
                             .get(id)
                             .and_then(|name| name.clone())
                             .unwrap_or_else(|| id.to_string())
-                    }
+                    },
+                    image: images.get(id).cloned().flatten(),
                 });
             positions.push(start + index);
             rows.push((playable, item.added_at.clone(), adder));
@@ -1200,6 +1205,7 @@ pub(crate) fn playlist_cached_table_items(
             owner_id,
             owner_name,
             &app.user_names,
+            &app.user_images,
         );
         if let Some(cache) = app.table_rows.get_mut(&key)
             && let Some(positions) = cache.playlist_positions.as_mut()
@@ -1222,8 +1228,14 @@ pub(crate) fn playlist_cached_table_items(
         }
     }
 
-    let (rows, positions, duration_ms) =
-        playlist_rows(&list.items, 0, owner_id, owner_name, &app.user_names);
+    let (rows, positions, duration_ms) = playlist_rows(
+        &list.items,
+        0,
+        owner_id,
+        owner_name,
+        &app.user_names,
+        &app.user_images,
+    );
     let items = remember_table_items(app, key.clone(), generation, revision, names_revision, rows);
     let positions = Arc::new(positions);
     if let Some(cache) = app.table_rows.get_mut(&key) {
@@ -2399,10 +2411,55 @@ mod tests {
                 (
                     PlayableItem::Track(track),
                     Some(format!("2024-01-0{i}")),
-                    Some(format!("User {i}")),
+                    Some(crate::model::Adder {
+                        name: format!("User {i}"),
+                        image: None,
+                    }),
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn playlist_rows_name_the_adder_with_their_picture() {
+        let item = |adder: &str| crate::api::models::PlaylistItem {
+            added_by: Some(crate::api::models::UserRef {
+                id: Some(adder.into()),
+            }),
+            item: Some(make_test_tracks().remove(0).0),
+            ..Default::default()
+        };
+        let names =
+            std::collections::HashMap::from([("friend".to_string(), Some("Friend".to_string()))]);
+        let images = std::collections::HashMap::from([
+            (
+                "friend".to_string(),
+                Some("https://i.scdn.co/image/f".to_string()),
+            ),
+            ("owner".to_string(), None),
+        ]);
+        let (rows, _, _) = playlist_rows(
+            &[item("friend"), item("owner")],
+            0,
+            Some("owner"),
+            "Owner",
+            &names,
+            &images,
+        );
+        assert_eq!(
+            rows[0].2,
+            Some(crate::model::Adder {
+                name: "Friend".into(),
+                image: Some("https://i.scdn.co/image/f".into()),
+            })
+        );
+        assert_eq!(
+            rows[1].2,
+            Some(crate::model::Adder {
+                name: "Owner".into(),
+                image: None,
+            })
+        );
     }
 
     #[test]
@@ -2443,7 +2500,10 @@ mod tests {
             };
             track.name = label.into();
             track.album.as_mut().unwrap().name = label.into();
-            item.2 = Some(label.into());
+            item.2 = Some(crate::model::Adder {
+                name: label.into(),
+                image: None,
+            });
         }
 
         for column in [SortColumn::Title, SortColumn::Album, SortColumn::AddedBy] {
