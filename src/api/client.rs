@@ -38,6 +38,15 @@ pub enum ApiError {
     SignInExpired { api_source: ApiSource },
     #[error("network error: {0}")]
     Network(String),
+    /// A playback request the local engine made over Spotify Connect.
+    #[error("{0}")]
+    Playback(String),
+    /// A newer device switch replaced this one before it finished.
+    #[error("replaced by a newer device switch")]
+    TransferReplaced,
+    /// The chosen device didn't take playback in time.
+    #[error("the device didn't respond")]
+    TransferTimedOut,
     #[error("unexpected response from Spotify: {0}")]
     Decode(String),
 }
