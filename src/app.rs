@@ -30,6 +30,9 @@ use crate::util;
 
 const REMOTE_POLL_ACTIVE: Duration = Duration::from_secs(4);
 const REMOTE_POLL_IDLE: Duration = Duration::from_secs(20);
+/// How often another device is polled while the engine receives Spotify's
+/// pushed updates: only a fallback for what the pushes don't carry.
+const REMOTE_POLL_PUSHED: Duration = Duration::from_secs(30);
 /// How long a device switch may go unsettled: librespot answers within 30
 /// seconds, and a pull that hasn't landed by then has failed.
 const SWITCH_DEADLINE: Duration = Duration::from_secs(35);
@@ -373,6 +376,13 @@ pub struct App {
     /// Web API commands sent and not yet answered, and when the last was sent.
     remote_in_flight: u32,
     remote_sent_at: Option<Instant>,
+    /// The engine is receiving Spotify's pushed updates for other devices.
+    remote_pushes: bool,
+    /// The song and device the last push reported, and how many polls since
+    /// disagreed with it (the Web API can lag the push).
+    pushed_song: Option<(String, Option<String>, u8)>,
+    /// When repeat was last changed here, so older pushes don't revert it.
+    repeat_set_at: Option<Instant>,
     /// A switch the user abandoned by choosing this computer while it was on
     /// its way, and its number. If it lands anyway, playback is taken back.
     pull_after_push: Option<(String, u64)>,
@@ -876,6 +886,9 @@ impl App {
             held_pick: None,
             remote_in_flight: 0,
             remote_sent_at: None,
+            remote_pushes: false,
+            pushed_song: None,
+            repeat_set_at: None,
             pull_after_push: None,
             reclaim_until: None,
             queue: if session.last_track.is_some() && !session.last_queue_rows.is_empty() {
@@ -1944,6 +1957,7 @@ impl App {
                     }
                 }
                 Event::Local(state) => self.handle_local(*state),
+                Event::Remote(playback) => self.handle_remote_push(*playback),
                 Event::Api(response) => self.handle_api(*response),
                 Event::Accent { url, color } => {
                     self.accent_pending.remove(&url);
@@ -2150,6 +2164,9 @@ impl App {
                 self.held_pick = None;
                 self.remote_in_flight = 0;
                 self.remote_sent_at = None;
+                self.remote_pushes = false;
+                self.pushed_song = None;
+                self.repeat_set_at = None;
                 self.pull_after_push = None;
                 self.reclaim_until = None;
                 self.local_playback = LocalPlayback::Unavailable;
@@ -2869,10 +2886,7 @@ impl App {
         }
 
         if self.is_connected() && !self.offline {
-            let interval = match self.target() {
-                Target::Local if self.local.is_active() => REMOTE_POLL_IDLE,
-                _ => REMOTE_POLL_ACTIVE,
-            };
+            let interval = self.connected_repaint_interval();
             if !self.remote_poll_pending && self.remote_polled_at.elapsed() >= interval {
                 self.poll_remote(false);
             }
@@ -5068,6 +5082,29 @@ impl App {
                         if uri != previous_uri {
                             self.on_now_playing_changed();
                         }
+                        // The Web API can lag what Spotify pushed: ask again,
+                        // a few times, until it agrees.
+                        let reported = self.remote.as_ref().map(|remote| {
+                            (
+                                remote.state.device.as_ref().and_then(|d| d.id.clone()),
+                                remote
+                                    .state
+                                    .item
+                                    .as_ref()
+                                    .map(|item| item.uri().to_string()),
+                            )
+                        });
+                        if let Some((device, song, retries)) = &mut self.pushed_song {
+                            let agrees = reported.as_ref().is_some_and(|(d, s)| {
+                                d.as_deref() == Some(device.as_str()) && s == song
+                            });
+                            if agrees || *retries >= 3 {
+                                self.pushed_song = None;
+                            } else {
+                                *retries += 1;
+                                self.poll_remote_soon();
+                            }
+                        }
                         // After a switch went wrong, Spotify says where playback
                         // is, and the chosen device follows it.
                         if let Some(Switch {
@@ -6345,7 +6382,8 @@ impl App {
     }
 
     fn poll_remote_soon(&mut self) {
-        self.remote_polled_at = Instant::now() - REMOTE_POLL_IDLE + Duration::from_millis(700);
+        self.remote_polled_at =
+            Instant::now() - self.connected_repaint_interval() + Duration::from_millis(700);
     }
 
     // ---- navigation ------------------------------------------------------------
@@ -7509,6 +7547,7 @@ impl App {
                 if let Some(remote) = self.remote.as_mut() {
                     remote.state.repeat_state = mode.api_name().to_string();
                 }
+                self.repeat_set_at = Some(Instant::now());
                 self.send_remote(ApiRequest::Remote {
                     action: RemoteAction::Repeat,
                     device_id,
@@ -7740,6 +7779,90 @@ impl App {
             switch.since = Instant::now();
         }
         self.poll_remote_soon();
+    }
+
+    /// Spotify pushed what plays on the active device. The same song on the same
+    /// device is updated in place; anything else is looked up at once.
+    fn handle_remote_push(&mut self, pushed: crate::player::RemotePlayback) {
+        self.remote_pushes = true;
+        let local_id = self.local_device_id.clone();
+        let device = pushed
+            .active_device
+            .clone()
+            .filter(|id| Some(id) != local_id.as_ref());
+        // A switch that went wrong settles on the first report of where playback is.
+        if matches!(
+            self.switch,
+            Some(Switch {
+                wait: SwitchWait::Poll { .. },
+                ..
+            })
+        ) {
+            self.selected_device = device.clone();
+            self.settle_switch();
+        }
+        let shown_device = self
+            .remote
+            .as_ref()
+            .and_then(|remote| remote.state.device.as_ref())
+            .and_then(|shown| shown.id.clone())
+            .filter(|id| Some(id) != local_id.as_ref());
+        let same_song = device.is_some()
+            && device == shown_device
+            && self
+                .remote
+                .as_ref()
+                .and_then(|remote| remote.state.item.as_ref())
+                .map(|item| item.uri())
+                == pushed.track_uri.as_deref();
+        if !same_song {
+            // Another song, another device, or playback stopped there: its
+            // details come from the Web API. This computer's playback has its
+            // own reports.
+            self.pushed_song = device
+                .clone()
+                .map(|device| (device, pushed.track_uri.clone(), 0));
+            if device.is_some() || shown_device.is_some() {
+                if self.remote_poll_pending {
+                    self.poll_remote_soon();
+                } else {
+                    self.poll_remote(true);
+                }
+            }
+            return;
+        }
+        let shuffle_settled = self
+            .shuffle_set_at
+            .is_none_or(|at| at.elapsed() > Duration::from_secs(5));
+        if let Some(remote) = &mut self.remote {
+            remote.state.is_playing = pushed.playing;
+            remote.state.progress_ms = Some(pushed.position_ms);
+            if self
+                .repeat_set_at
+                .is_none_or(|at| at.elapsed() > Duration::from_secs(5))
+            {
+                remote.state.repeat_state = pushed.repeat.api_name().to_string();
+            }
+            if shuffle_settled && remote.state.shuffle_state != pushed.shuffle {
+                // Accept shuffle changes from another device.
+                remote.state.shuffle_state = pushed.shuffle;
+                self.shuffle_wanted = pushed.shuffle;
+            }
+            remote.received_at = pushed.observed_at;
+        }
+        if self
+            .optimistic_playing
+            .is_some_and(|(wanted, _)| wanted == pushed.playing)
+        {
+            self.optimistic_playing = None;
+        }
+        // A position just sought is confirmed once the device reports it.
+        if self
+            .pending_remote_position
+            .is_some_and(|(position, _)| pushed.position_ms.abs_diff(position) < 3_000)
+        {
+            self.pending_remote_position = None;
+        }
     }
 
     /// Closes windows and waits that ran out.
@@ -10261,15 +10384,14 @@ impl App {
         self.frame_now = None;
     }
 
-    /// How soon the window asks for another frame while signed in.
-    ///
-    /// API polling already uses 20s during local playback. This only changes
-    /// the UI deadline. While a track is playing, the 250ms progress refresh
-    /// still wins, so the saving is idle-local frames: 4s -> 20s, 80% fewer
-    /// wakeups when paused on this device.
+    /// How often another device's playback is polled, and how soon the window
+    /// asks for another frame while signed in: 20s during local playback, 30s
+    /// for another device while Spotify pushes its updates, 4s otherwise.
+    /// While a track is playing, the 250ms progress refresh still wins.
     fn connected_repaint_interval(&self) -> Duration {
         match self.target() {
             Target::Local if self.local.is_active() => REMOTE_POLL_IDLE,
+            _ if self.remote_pushes && self.local.connected => REMOTE_POLL_PUSHED,
             _ => REMOTE_POLL_ACTIVE,
         }
     }
@@ -17998,6 +18120,89 @@ mod tests {
             "confirmed edits stop protecting an old page"
         );
         assert!(app.playlist_pages.len() <= 12);
+    }
+
+    #[test]
+    fn pushed_updates_from_another_device_show_without_polling() {
+        let pushed =
+            |device: Option<&str>, track: &str, playing: bool| crate::player::RemotePlayback {
+                active_device: device.map(Into::into),
+                track_uri: Some(track.into()),
+                playing,
+                position_ms: 42_000,
+                observed_at: Instant::now(),
+                shuffle: false,
+                repeat: RepeatMode::Off,
+            };
+        let mut app = test_app("remote-pushes");
+        app.auth = AuthStatus::Connected {
+            username: "user".into(),
+        };
+        app.local_device_id = Some("this-computer".into());
+        app.selected_device = Some("phone".into());
+        app.remote = Some(RemoteSnapshot {
+            state: crate::api::models::PlaybackState {
+                device: Some(crate::api::models::Device {
+                    id: Some("phone".into()),
+                    name: "Phone".into(),
+                    is_active: true,
+                    ..Default::default()
+                }),
+                is_playing: true,
+                progress_ms: Some(10_000),
+                item: Some(PlayableItem::Track(crate::api::models::Track {
+                    uri: "spotify:track:downside".into(),
+                    duration_ms: 200_000,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            received_at: Instant::now(),
+        });
+
+        // Paused on the phone: shown at once, and nothing is asked for.
+        let polls = app.remote_poll_seq;
+        app.handle_remote_push(pushed(Some("phone"), "spotify:track:downside", false));
+        let now = app.now_playing().expect("the phone's song");
+        assert!(!now.playing);
+        assert!(now.position_ms >= 42_000);
+        assert_eq!(app.remote_poll_seq, polls, "no request for a pause");
+        assert_eq!(
+            app.connected_repaint_interval(),
+            REMOTE_POLL_ACTIVE,
+            "no engine"
+        );
+        app.local.connected = true;
+        assert_eq!(app.connected_repaint_interval(), REMOTE_POLL_PUSHED);
+
+        // Another song: its details are looked up at once, and again soon if
+        // the Web API still reports the old one.
+        app.handle_remote_push(pushed(Some("phone"), "spotify:track:sin", true));
+        assert_eq!(app.remote_poll_seq, polls + 1);
+        let stale = app.remote.as_ref().map(|remote| remote.state.clone());
+        app.handle_api(ApiResponse::PlaybackState {
+            seq: app.remote_poll_seq,
+            result: Ok(stale),
+        });
+        assert!(
+            app.remote_polled_at.elapsed() + Duration::from_secs(1)
+                >= app.connected_repaint_interval(),
+            "the next poll is due within a second, not the 30 s fallback"
+        );
+
+        // A switch that went wrong settles on the first report of where
+        // playback is.
+        app.remote_poll_pending = false;
+        app.switch = Some(Switch {
+            to: Some("speaker".into()),
+            wait: SwitchWait::Poll {
+                after: app.remote_poll_seq,
+            },
+            since: Instant::now(),
+        });
+        app.handle_remote_push(pushed(Some("phone"), "spotify:track:sin", true));
+        assert!(!app.switching());
+        assert_eq!(app.selected_device.as_deref(), Some("phone"));
     }
 
     #[test]

@@ -260,16 +260,18 @@ hyper-proxy2 = { git = "https://github.com/crmne/hyper-proxy2", rev = "efca48113
 # normalisation-factor reporting for the visualisers, and a distinct event
 # when Spotify refuses an audio key, bounded socket setup with DNS address
 # fallback, an in-memory credential cache for platform storage, full
-# playback-state recovery after a session disconnect, and Spirc::transfer_to for
-# switching devices over Connect (Magniquick/librespot, branch spirc-transfer-to,
-# which also carries the fork's Windows ARM64 platform fix).
+# playback-state recovery after a session disconnect, Spirc::transfer_to for
+# switching devices over Connect, and the remote state channels of
+# librespot-org/librespot#1704 (Magniquick/librespot, branch
+# transfer-to-remote-state, which also carries the fork's Windows ARM64
+# platform fix).
 # Recovery is proposed upstream in librespot-org/librespot#1765.
 # Every librespot crate comes from the
 # fork so one copy exists. Drop patches as upstream takes them.
-librespot-audio = { git = "https://github.com/Magniquick/librespot", rev = "ed3215a69531f40d0efb810a0b7bca17308d3dc7" }
-librespot-connect = { git = "https://github.com/Magniquick/librespot", rev = "ed3215a69531f40d0efb810a0b7bca17308d3dc7" }
-librespot-core = { git = "https://github.com/Magniquick/librespot", rev = "ed3215a69531f40d0efb810a0b7bca17308d3dc7" }
-librespot-metadata = { git = "https://github.com/Magniquick/librespot", rev = "ed3215a69531f40d0efb810a0b7bca17308d3dc7" }
-librespot-oauth = { git = "https://github.com/Magniquick/librespot", rev = "ed3215a69531f40d0efb810a0b7bca17308d3dc7" }
-librespot-playback = { git = "https://github.com/Magniquick/librespot", rev = "ed3215a69531f40d0efb810a0b7bca17308d3dc7" }
-librespot-protocol = { git = "https://github.com/Magniquick/librespot", rev = "ed3215a69531f40d0efb810a0b7bca17308d3dc7" }
+librespot-audio = { git = "https://github.com/Magniquick/librespot", rev = "88997b534cd27dc7c98a07b157a8c8cf8851353c" }
+librespot-connect = { git = "https://github.com/Magniquick/librespot", rev = "88997b534cd27dc7c98a07b157a8c8cf8851353c" }
+librespot-core = { git = "https://github.com/Magniquick/librespot", rev = "88997b534cd27dc7c98a07b157a8c8cf8851353c" }
+librespot-metadata = { git = "https://github.com/Magniquick/librespot", rev = "88997b534cd27dc7c98a07b157a8c8cf8851353c" }
+librespot-oauth = { git = "https://github.com/Magniquick/librespot", rev = "88997b534cd27dc7c98a07b157a8c8cf8851353c" }
+librespot-playback = { git = "https://github.com/Magniquick/librespot", rev = "88997b534cd27dc7c98a07b157a8c8cf8851353c" }
+librespot-protocol = { git = "https://github.com/Magniquick/librespot", rev = "88997b534cd27dc7c98a07b157a8c8cf8851353c" }
