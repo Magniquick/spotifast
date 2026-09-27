@@ -6,7 +6,7 @@ msgstr ""
 "Project-Id-Version: Spotifast\n"
 "Report-Msgid-Bugs-To: https://github.com/crmne/spotifast/issues/new?"
 "template=translation.yml\n"
-"POT-Creation-Date: 2026-09-28 00:02+0530\n"
+"POT-Creation-Date: 2026-09-28 00:11+0530\n"
 "PO-Revision-Date: 2026-09-23 20:00+0000\n"
 "Last-Translator: Spotifast contributors\n"
 "Language-Team: Russian\n"
@@ -30,12 +30,12 @@ msgid "Play {name}"
 msgstr "Воспроизвести {name}"
 
 #: src/ui/sidebar.rs:289 src/app.rs:2404 src/app.rs:16226
-#: src/ui/collection.rs:1649 src/ui/collection.rs:1826
+#: src/ui/collection.rs:1653 src/ui/collection.rs:1830
 msgid "Playlist"
 msgstr "Плейлист"
 
 #: src/ui/sidebar.rs:299 src/app.rs:2378 src/app.rs:16231
-#: src/ui/collection.rs:1819 src/ui/home.rs:49 src/ui/keys.rs:253
+#: src/ui/collection.rs:1823 src/ui/home.rs:49 src/ui/keys.rs:253
 #: src/ui/winamp/playlist.rs:653
 msgid "Liked Songs"
 msgstr "Любимые треки"
@@ -185,7 +185,7 @@ msgstr[2] "Плейлист • {count} треков"
 #. Translators: Keep {count} exactly as written. It becomes a number of songs.
 #. Translators: Keep {count} exactly as written. It becomes the number of selected songs.
 #. Translators: {count} is a number of songs.
-#: src/i18n.rs:183 src/ui/widgets.rs:530 src/ui/collection.rs:1913
+#: src/i18n.rs:183 src/ui/widgets.rs:530 src/ui/collection.rs:1917
 #, rust-format
 msgid "{count} song"
 msgid_plural "{count} songs"
@@ -342,7 +342,7 @@ msgid "Next up"
 msgstr "Далее"
 
 #: src/ui/queue.rs:465 src/ui/queue.rs:498 src/ui/widgets.rs:2415
-#: src/ui/collection.rs:1022
+#: src/ui/collection.rs:1023
 msgid "Retry"
 msgstr "Повторить"
 
@@ -485,12 +485,12 @@ msgctxt "artist"
 msgid "Follow"
 msgstr "Подписаться"
 
-#: src/ui/widgets.rs:990 src/ui/collection.rs:1697 src/ui/collection.rs:1719
+#: src/ui/widgets.rs:990 src/ui/collection.rs:1701 src/ui/collection.rs:1723
 #: src/ui/show.rs:169
 msgid "Remove from Your Library"
 msgstr "Удалить из медиатеки"
 
-#: src/ui/widgets.rs:991 src/ui/collection.rs:1696
+#: src/ui/widgets.rs:991 src/ui/collection.rs:1700
 msgid "Add to Your Library"
 msgstr "Добавить в медиатеку"
 
@@ -2041,37 +2041,37 @@ msgstr "Фильтр"
 msgid "Unavailable"
 msgstr "Недоступно"
 
-#: src/ui/collection.rs:863
+#: src/ui/collection.rs:864
 msgid "Nothing here yet"
 msgstr "Здесь пока ничего нет"
 
-#: src/ui/collection.rs:864
+#: src/ui/collection.rs:865
 msgid "Added songs appear here."
 msgstr "Здесь появятся добавленные треки."
 
-#: src/ui/collection.rs:1244 src/ui/home.rs:653
+#: src/ui/collection.rs:1245 src/ui/home.rs:653
 msgid "Your top songs"
 msgstr "Твои топ-треки"
 
-#: src/ui/collection.rs:1253
+#: src/ui/collection.rs:1254
 msgid "Your most-played tracks from the last four weeks."
 msgstr "Самое прослушиваемое за последние четыре недели."
 
-#: src/ui/collection.rs:1645
+#: src/ui/collection.rs:1649
 msgid "Collaborative Playlist"
 msgstr "Совместный плейлист"
 
-#: src/ui/collection.rs:1647
+#: src/ui/collection.rs:1651
 msgid "Public Playlist"
 msgstr "Открытый плейлист"
 
-#: src/ui/collection.rs:1718
+#: src/ui/collection.rs:1722
 msgid "Save to Your Library"
 msgstr "Сохранить в медиатеке"
 
 #. Translators: {count} is a number of songs and {duration} their total
 #. length, such as "2 hr 13 min".
-#: src/ui/collection.rs:1926
+#: src/ui/collection.rs:1930
 #, rust-format
 msgid "{count} song, {duration}"
 msgid_plural "{count} songs, {duration}"
@@ -2080,19 +2080,19 @@ msgstr[1] "{count} трека, {duration}"
 msgstr[2] "{count} треков, {duration}"
 
 #. Translators: {name} is the name of someone who added songs to the playlist.
-#: src/ui/collection.rs:1940
+#: src/ui/collection.rs:1944
 #, rust-format
 msgid "with {name}"
 msgstr "с {name}"
 
 #. Translators: {first} and {second} are names of people who added songs.
-#: src/ui/collection.rs:1944
+#: src/ui/collection.rs:1948
 #, rust-format
 msgid "with {first} and {second}"
 msgstr "с {first} и {second}"
 
 #. Translators: {count} is how many other people added songs to the playlist.
-#: src/ui/collection.rs:1951
+#: src/ui/collection.rs:1955
 #, rust-format
 msgid "and {count} other"
 msgid_plural "and {count} others"
