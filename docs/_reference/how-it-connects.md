@@ -313,6 +313,11 @@ asks Spotify to move playback, and waits up to 30 seconds for the device to take
 it. A device that doesn't respond in that time is reported by name, and playback
 stays where it was. This costs no Web API requests; the Web API switches devices
 only when nothing is active to transfer from, or when local playback isn't set up.
+Controls given while a switch is under way (play or pause, seek, next,
+previous, shuffle, repeat, or picking a song) show at once and are held until it
+is known where playback ended up: they then go, in the order given, to the
+device that took playback, or stay on this computer if the switch fails. Volume
+stays with this computer, which is the one playing until the switch completes.
 
 When the PulseAudio backend is selected on Linux, its PulseAudio or PipeWire
 stream is named **Spotifast**, with **Spotify playback** as its description, so

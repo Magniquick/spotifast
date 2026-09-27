@@ -30,6 +30,12 @@ use crate::util;
 
 const REMOTE_POLL_ACTIVE: Duration = Duration::from_secs(4);
 const REMOTE_POLL_IDLE: Duration = Duration::from_secs(20);
+/// How long a push may keep commands away from the local engine while it
+/// still reports playing: until the switch resolves, which Connect bounds at
+/// 30 seconds. The engine normally lets go within a second or two.
+const OUTGOING_TRANSFER_HOLD: Duration = Duration::from_secs(35);
+/// How soon the engine lets go after a switch it didn't want lands.
+const RECLAIM_WINDOW: Duration = Duration::from_secs(10);
 const REMOTE_FRESH: Duration = Duration::from_secs(45);
 const DEVICES_FRESH: Duration = Duration::from_secs(12);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(280);
@@ -138,6 +144,82 @@ pub struct NowPlaying {
     /// The remembered song from the last session, shown paused before a
     /// first press. Nothing is playing yet.
     pub resuming: bool,
+}
+
+/// Controls given while a device switch is under way, in the order given.
+/// They are applied once it is known where playback ended up, so none reaches a
+/// device that hasn't taken playback, and none is lost if the switch fails.
+#[derive(Debug, Default)]
+struct HeldControls {
+    /// Playing or paused when the switch began: the switch carries that over,
+    /// so only a different final choice needs a command.
+    baseline_playing: Option<bool>,
+    steps: Vec<crate::backend::RemoteStep>,
+}
+
+impl HeldControls {
+    fn push(&mut self, step: crate::backend::RemoteStep) {
+        use crate::backend::RemoteStep::*;
+        match step {
+            // A new song replaces what was chosen to play before it; the
+            // shuffle and repeat modes still apply to it.
+            PlayRequest { .. } => self
+                .steps
+                .retain(|held| matches!(held, Shuffle(_) | Repeat(_))),
+            // A seek before a skip is moot, and only the last seek counts.
+            Next | Previous => self.steps.retain(|held| !matches!(held, Seek(_))),
+            Seek(_) => self.steps.retain(|held| !matches!(held, Seek(_))),
+            // Only the final play state, shuffle, and repeat matter.
+            Play | Pause => self.steps.retain(|held| !matches!(held, Play | Pause)),
+            Shuffle(_) => self.steps.retain(|held| !matches!(held, Shuffle(_))),
+            Repeat(_) => self.steps.retain(|held| !matches!(held, Repeat(_))),
+        }
+        self.steps.push(step);
+    }
+
+    fn playing(&self) -> Option<bool> {
+        self.steps.iter().rev().find_map(|step| match step {
+            crate::backend::RemoteStep::Play | crate::backend::RemoteStep::PlayRequest { .. } => {
+                Some(true)
+            }
+            crate::backend::RemoteStep::Pause => Some(false),
+            _ => None,
+        })
+    }
+
+    fn position_ms(&self) -> Option<u32> {
+        self.steps.iter().rev().find_map(|step| match step {
+            crate::backend::RemoteStep::Seek(position_ms) => Some(*position_ms),
+            _ => None,
+        })
+    }
+
+    /// The steps worth sending: a final play state equal to the one the switch
+    /// carries over is dropped.
+    fn into_steps(self) -> Vec<crate::backend::RemoteStep> {
+        let wanted = self.playing();
+        // A picked song starts playing whatever the state before it.
+        let baseline = if self
+            .steps
+            .iter()
+            .any(|step| matches!(step, crate::backend::RemoteStep::PlayRequest { .. }))
+        {
+            Some(true)
+        } else {
+            self.baseline_playing
+        };
+        let redundant = wanted.is_some() && wanted == baseline;
+        self.steps
+            .into_iter()
+            .filter(|step| {
+                !(redundant
+                    && matches!(
+                        step,
+                        crate::backend::RemoteStep::Play | crate::backend::RemoteStep::Pause
+                    ))
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -318,9 +400,32 @@ pub struct App {
     pub devices_loading: bool,
     devices_fetched_at: Option<Instant>,
     pub selected_device: Option<String>,
+    /// A push to another device that local playback has not yet let go of:
+    /// until the engine reports it stopped, commands follow the push instead
+    /// of reaching the local engine, whose load would take playback back.
+    outgoing_transfer: Option<(String, Instant)>,
     /// The device a switch is pending to, and the device confirmed before it,
     /// restored if the switch fails.
     transfer_fallback: Option<(String, Option<String>)>,
+    /// A switch the user abandoned by choosing this computer while it was on
+    /// its way. If it lands anyway, playback is taken back: the last choice wins.
+    pull_after_push: Option<String>,
+    /// That abandoned switch landed: take playback back if the engine lets go
+    /// before this deadline (after it, a release is someone else's doing).
+    reclaim_until: Option<Instant>,
+    held_controls: HeldControls,
+    /// Controls held for a switch the user abandoned by choosing this computer:
+    /// applied here once playback is back (after the reclaim), so the reclaim,
+    /// which restores the other device's state, can't undo them.
+    held_after_reclaim: bool,
+    /// The reclaim was asked for: held controls apply once the engine settles.
+    reclaim_issued: bool,
+    /// Held-after-reclaim controls apply wherever playback is by then, even if
+    /// the reclaim never completes.
+    held_after_reclaim_until: Option<Instant>,
+    /// A held seek sent to the device that took over, shown while the engine
+    /// here is still letting go.
+    confirmed_seek: Option<u32>,
     pub queue: Loadable<Queue>,
     queue_fetched_at: Option<Instant>,
     /// Latest queue request sequence. Older responses are discarded.
@@ -811,7 +916,15 @@ impl App {
             devices_loading: false,
             devices_fetched_at: None,
             selected_device: None,
+            outgoing_transfer: None,
             transfer_fallback: None,
+            pull_after_push: None,
+            reclaim_until: None,
+            held_controls: HeldControls::default(),
+            held_after_reclaim: false,
+            reclaim_issued: false,
+            held_after_reclaim_until: None,
+            confirmed_seek: None,
             queue: if session.last_track.is_some() && !session.last_queue_rows.is_empty() {
                 // The queue as it was at close, shown until something
                 // plays; then the live queue takes over.
@@ -1224,6 +1337,11 @@ impl App {
 
     /// Where playback commands go: this computer's player or a remote device.
     pub fn target(&self) -> Target {
+        if let Some((device, since)) = &self.outgoing_transfer
+            && since.elapsed() < OUTGOING_TRANSFER_HOLD
+        {
+            return Target::Remote(Some(device.clone()));
+        }
         if self.local_ready && self.local.is_active() {
             return Target::Local;
         }
@@ -1307,6 +1425,11 @@ impl App {
     /// The local engine is the playback authority. A real track change wins
     /// even when the queue's optimistic guess named a different track.
     fn reconcile_local_track_intent(&mut self, track_changed: bool, reported: Option<&str>) {
+        // While controls are held, the engine's track changes (letting go, the
+        // reclaim loading) aren't the held choice arriving.
+        if self.holding_controls() {
+            return;
+        }
         let settled = self.intent_track.as_ref().is_some_and(|intent| {
             matches!(intent.confirmation, TrackConfirmation::Local)
                 && (track_changed || reported == Some(intent.uri.as_str()))
@@ -1321,6 +1444,11 @@ impl App {
     /// held and checked once more. Agreement, or two later mismatches, settles
     /// on the reported state.
     fn reconcile_remote_track_intent(&mut self, poll: u64, reported: Option<&str>) {
+        // While controls are held nothing was sent yet: the device can't have
+        // moved, so its report says nothing about the held skip.
+        if self.holding_controls() {
+            return;
+        }
         let mut settled = false;
         let mut recheck = false;
         if let Some(intent) = &mut self.intent_track
@@ -1461,7 +1589,12 @@ impl App {
                     .clone()
                     .or_else(|| track.art_url.clone()),
                 duration_ms: track.duration_ms,
-                position_ms: self.local.position_now(),
+                position_ms: self
+                    .holding_controls()
+                    .then(|| self.held_controls.position_ms())
+                    .flatten()
+                    .or_else(|| self.outgoing_transfer.as_ref().and(self.confirmed_seek))
+                    .unwrap_or_else(|| self.local.position_now()),
                 playing,
                 loading: self.local.playback == Playback::Loading,
                 shuffle: self.shuffle_wanted,
@@ -2069,7 +2202,15 @@ impl App {
                 self.local_ready = false;
                 self.local_device_id = None;
                 // Nothing of the old account's device switches survives sign-out.
+                self.outgoing_transfer = None;
                 self.transfer_fallback = None;
+                self.pull_after_push = None;
+                self.reclaim_until = None;
+                self.held_controls = HeldControls::default();
+                self.held_after_reclaim = false;
+                self.reclaim_issued = false;
+                self.held_after_reclaim_until = None;
+                self.confirmed_seek = None;
                 self.local_playback = LocalPlayback::Unavailable;
                 self.remote = None;
                 self.rootlist.clear();
@@ -2214,6 +2355,28 @@ impl App {
     }
 
     fn handle_local(&mut self, state: LocalState) {
+        let switching = self.outgoing_transfer.is_some() || self.held_after_reclaim;
+        let released = !state.is_active();
+        // The push took: local playback let go. Controls held meanwhile go to
+        // the device that took it.
+        // A release is the target taking over only once that target confirmed;
+        // otherwise it may be an earlier switch landing, and the hold waits for
+        // this switch's own answer.
+        let took_over = match &self.outgoing_transfer {
+            Some((device, _)) if released => {
+                let unconfirmed = self
+                    .transfer_fallback
+                    .as_ref()
+                    .is_some_and(|(pending, _)| pending == device);
+                if unconfirmed {
+                    None
+                } else {
+                    self.outgoing_transfer.take().map(|(device, _)| device)
+                }
+            }
+            _ => None,
+        };
+
         if self
             .local_transfer_sequence
             .is_some_and(|sequence| sequence != state.track_sequence)
@@ -2229,6 +2392,7 @@ impl App {
             state.track != self.local.track || state.track_sequence != self.local.track_sequence;
         let reconnected = state.connected && !self.local.connected;
         if state.shuffle != self.local.shuffle
+            && !self.holding_controls()
             && self
                 .shuffle_set_at
                 .is_none_or(|at| at.elapsed() > Duration::from_secs(5))
@@ -2236,7 +2400,9 @@ impl App {
             // Accept shuffle changes made by another client.
             self.shuffle_wanted = state.shuffle;
         }
-        if state.playback != self.local.playback {
+        // During a switch the shown play state is the one chosen for the device
+        // taking over, not the engine letting go.
+        if state.playback != self.local.playback && !switching {
             self.optimistic_playing = None;
             if matches!(state.playback, Playback::Playing | Playback::Loading) {
                 self.clear_play_pending();
@@ -2305,6 +2471,42 @@ impl App {
         self.local = state;
         if let Some(volume) = held_volume {
             self.local.volume = volume;
+        }
+        // Shuffle and repeat chosen during the hold stay shown until applied.
+        if self.holding_controls() {
+            for step in &self.held_controls.steps {
+                match step {
+                    crate::backend::RemoteStep::Shuffle(on) => self.local.shuffle = *on,
+                    crate::backend::RemoteStep::Repeat(mode) => {
+                        self.local.repeat = RepeatMode::from_api(mode)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(device) = took_over {
+            self.apply_held_controls(Target::Remote(Some(device)));
+        }
+        // Once the reclaimed engine has settled (not while it loads), what was
+        // held applies here.
+        let settled = matches!(self.local.playback, Playback::Playing | Playback::Paused);
+        if self.held_after_reclaim && self.reclaim_issued && settled {
+            self.held_after_reclaim = false;
+            self.reclaim_issued = false;
+            self.held_after_reclaim_until = None;
+            self.apply_held_controls(Target::Local);
+        }
+        // Only a release within the window is the abandoned switch landing;
+        // an expired window is closed in tick().
+        let reclaim = match self.reclaim_until {
+            Some(until) if released && Instant::now() < until => {
+                self.reclaim_until = None;
+                true
+            }
+            _ => false,
+        };
+        if reclaim && let Some(this_computer) = self.local_device_id.clone() {
+            self.transfer(this_computer);
         }
         if track_changed {
             self.on_now_playing_changed();
@@ -2772,6 +2974,67 @@ impl App {
         if self.is_connected() && !self.offline {
             self.request_resume_track();
             self.ensure_resume_context_loaded();
+        }
+
+        // Controls held for an abandoned switch never outlive the reclaim: when it
+        // doesn't complete, they apply wherever playback is.
+        if self
+            .held_after_reclaim_until
+            .is_some_and(|until| Instant::now() >= until)
+        {
+            self.held_after_reclaim_until = None;
+            self.reclaim_issued = false;
+            if std::mem::take(&mut self.held_after_reclaim) {
+                let home = self.playback_home();
+                self.apply_held_controls(home);
+            }
+        }
+        // An abandoned switch's reclaim window closed without a release: playback
+        // stayed where it is, and the controls held for it apply there.
+        if self
+            .reclaim_until
+            .is_some_and(|until| Instant::now() >= until)
+        {
+            self.reclaim_until = None;
+            if std::mem::take(&mut self.held_after_reclaim) {
+                let home = self.playback_home();
+                self.apply_held_controls(home);
+            }
+        }
+        // A switch that neither settled nor let the engine go: playback is still
+        // here, and so are the controls given meanwhile.
+        if let Some((device, since)) = &self.outgoing_transfer
+            && since.elapsed() >= OUTGOING_TRANSFER_HOLD
+        {
+            let unconfirmed = self
+                .transfer_fallback
+                .as_ref()
+                .is_some_and(|(pending, _)| pending == device);
+            self.outgoing_transfer = None;
+            if unconfirmed {
+                let home = self.playback_home();
+                self.apply_held_controls(home);
+            }
+        } else if self.holding_controls() {
+            // What the held controls show lasts as long as the hold, however
+            // slowly the device answers.
+            // Only markers still in effect: an expired one stays expired.
+            let now = Instant::now();
+            if let Some(intent) = &mut self.intent_track
+                && intent.at.elapsed() < PLAYBACK_HOLD
+            {
+                intent.at = now;
+            }
+            if let Some((_, at)) = &mut self.optimistic_playing
+                && at.elapsed() < PLAYBACK_HOLD
+            {
+                *at = now;
+            }
+            if let Some(assumed) = &mut self.assumed_context
+                && assumed.at.elapsed() < ASSUMED_CONTEXT_HOLD
+            {
+                assumed.at = now;
+            }
         }
 
         if self.is_connected() && !self.offline {
@@ -6177,7 +6440,47 @@ impl App {
                 }
                 self.poll_remote_soon();
             }
-            ApiResponse::Transferred { device_id, result } => self.transferred(device_id, result),
+            ApiResponse::Transferred { device_id, result } => {
+                self.transferred(device_id, result);
+            }
+            ApiResponse::RemoteSequenceFinished {
+                failed,
+                reshaped_queue,
+                skip_lost,
+                play_lost,
+                seek_lost,
+            } => {
+                self.clear_play_pending();
+                match failed {
+                    None => {
+                        self.remote_recheck_at = Some(Instant::now() + REMOTE_RECHECK);
+                        if reshaped_queue {
+                            self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
+                        }
+                    }
+                    Some((action, error)) => {
+                        // The failed step and every later one didn't happen: drop
+                        // what was shown for them and ask the device where it is.
+                        // A skip that did happen keeps its song shown.
+                        if play_lost {
+                            self.optimistic_playing = None;
+                        }
+                        if seek_lost {
+                            self.pending_remote_position = None;
+                            self.confirmed_seek = None;
+                        }
+                        if skip_lost {
+                            self.intent_track = None;
+                        }
+                        self.refresh_queue(true);
+                        self.toast_error(format!(
+                            "{}: {error}.",
+                            remote_action_label(self.locale, action)
+                        ));
+                    }
+                }
+                self.poll_remote_soon();
+            }
             ApiResponse::QueueAdded { label: _, result } => match result {
                 Ok(()) => {
                     // Refresh the queue after the optimistic update.
@@ -6770,6 +7073,18 @@ impl App {
             shuffle: shuffle.then_some(true),
             at: Instant::now(),
         });
+        // During a switch a picked song waits for it to settle, then plays on
+        // the device that took playback: sent now, the arriving transfer could
+        // replace it.
+        if self.holding_controls() {
+            self.held_controls
+                .push(crate::backend::RemoteStep::PlayRequest {
+                    request: Box::new(request),
+                    shuffle,
+                });
+            self.optimistic_playing = Some((true, Instant::now()));
+            return;
+        }
         self.queue_start_pending = Some(self.target());
         match self.target() {
             Target::Local if !self.local.connected => {
@@ -7163,6 +7478,17 @@ impl App {
 
     fn toggle_play(&mut self) {
         let playing = self.now_playing().map(|now| now.playing);
+        if self.holding_controls() {
+            if let Some(playing) = playing {
+                self.held_controls.push(if playing {
+                    crate::backend::RemoteStep::Pause
+                } else {
+                    crate::backend::RemoteStep::Play
+                });
+                self.optimistic_playing = Some((!playing, Instant::now()));
+            }
+            return;
+        }
         match self.target() {
             Target::Local => {
                 if self.local.is_active() {
@@ -7229,6 +7555,17 @@ impl App {
             self.session_dirty = true;
             return;
         }
+        if self.holding_controls() {
+            self.held_controls
+                .push(crate::backend::RemoteStep::Seek(position_ms));
+            // A song already skipped to shows (and seeks from) the held position.
+            if let Some(intent) = &mut self.intent_track {
+                intent.position_ms = position_ms;
+            }
+            return;
+        }
+        // A new seek replaces one held and sent during a switch.
+        self.confirmed_seek = None;
         match self.target() {
             Target::Local => self.backend.player(PlayerCommand::Seek(position_ms)),
             Target::Remote(device_id) => {
@@ -7264,7 +7601,14 @@ impl App {
     /// at once, and Spotify is told where it ended up on release.
     fn set_volume(&mut self, percent: u8, settle: bool) {
         let percent = percent.min(100);
-        match self.target() {
+        // During a switch the local engine is the one being heard; the device
+        // taking over keeps its own volume.
+        let target = if self.switch_pending() {
+            Target::Local
+        } else {
+            self.target()
+        };
+        match target {
             Target::Local => {
                 let volume = percent_to_volume(percent);
                 self.local.volume = volume;
@@ -7326,6 +7670,12 @@ impl App {
         }
         self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
         self.note_shuffle_pending();
+        if self.holding_controls() {
+            self.local.shuffle = shuffle;
+            self.held_controls
+                .push(crate::backend::RemoteStep::Shuffle(shuffle));
+            return;
+        }
         match self.target() {
             Target::Local => {
                 self.local.shuffle = shuffle;
@@ -7352,6 +7702,13 @@ impl App {
     }
 
     fn set_repeat(&mut self, mode: RepeatMode) {
+        if self.holding_controls() {
+            self.local.repeat = mode;
+            self.held_controls.push(crate::backend::RemoteStep::Repeat(
+                mode.api_name().to_string(),
+            ));
+            return;
+        }
         match self.target() {
             Target::Local => {
                 self.local.repeat = mode;
@@ -7376,9 +7733,20 @@ impl App {
 
     fn transfer(&mut self, device_id: String) {
         if Some(device_id.as_str()) == self.local_device_id.as_deref() {
-            // A switch still on its way can't be recalled; its answer no longer
-            // decides the chosen device.
-            self.transfer_fallback = None;
+            // A switch still on its way can't be recalled; take playback back
+            // if it lands. Controls held for it apply here, where playback is.
+            if let Some((pending, _)) = self.transfer_fallback.take() {
+                self.pull_after_push = Some(pending);
+                self.held_after_reclaim = true;
+                self.reclaim_issued = false;
+                self.held_after_reclaim_until =
+                    Some(Instant::now() + OUTGOING_TRANSFER_HOLD + RECLAIM_WINDOW);
+            } else if self.outgoing_transfer.is_some() {
+                // A confirmed switch the engine hasn't let go of yet: it will,
+                // and then playback comes back.
+                self.reclaim_until = Some(Instant::now() + RECLAIM_WINDOW);
+            }
+            self.outgoing_transfer = None;
             self.selected_device = None;
             self.show_devices = false;
             if !self.local.is_active() {
@@ -7389,9 +7757,16 @@ impl App {
                 self.local_list = None;
                 self.resume_queue.clear();
                 self.queued_play = None;
-                self.intent_track = None;
                 self.assumed_context = None;
-                self.optimistic_playing = None;
+                if self.held_after_reclaim {
+                    // What the held controls show stays until they apply, once
+                    // the reclaim has had time to land.
+                    self.reclaim_issued = true;
+                    self.held_after_reclaim_until = Some(Instant::now() + OUTGOING_TRANSFER_HOLD);
+                } else {
+                    self.intent_track = None;
+                    self.optimistic_playing = None;
+                }
                 self.clear_play_pending();
                 self.backend.player(PlayerCommand::Transfer);
             }
@@ -7408,6 +7783,14 @@ impl App {
             return;
         }
         let play = self.now_playing().is_some_and(|now| now.playing);
+        // Decided before this switch changes the pending state it reads.
+        let replacing = self.switch_pending() || self.held_after_reclaim;
+        self.pull_after_push = None;
+        self.reclaim_until = None;
+        self.held_after_reclaim = false;
+        self.reclaim_issued = false;
+        self.held_after_reclaim_until = None;
+        self.confirmed_seek = None;
         let previous = self.selected_device.replace(device_id.clone());
         // A switch replacing a pending one falls back to the last confirmed device.
         let previous = match self.transfer_fallback.take() {
@@ -7415,7 +7798,167 @@ impl App {
             None => previous,
         };
         self.transfer_fallback = Some((device_id.clone(), previous));
+        // A switch replacing a pending one keeps the controls held so far.
+        if !replacing {
+            self.held_controls = HeldControls {
+                baseline_playing: Some(play),
+                ..HeldControls::default()
+            };
+        }
+        self.outgoing_transfer = self
+            .local
+            .is_active()
+            .then(|| (device_id.clone(), Instant::now()));
+        self.show_devices = false;
         self.backend.api(ApiRequest::Transfer { device_id, play });
+    }
+
+    /// A push is under way, not yet confirmed, while the local engine still
+    /// plays: controls wait to learn where playback ends up. Once the device
+    /// confirms, they go to it directly.
+    fn switch_pending(&self) -> bool {
+        self.outgoing_transfer.as_ref().is_some_and(|(to, since)| {
+            since.elapsed() < OUTGOING_TRANSFER_HOLD
+                && self
+                    .transfer_fallback
+                    .as_ref()
+                    .is_some_and(|(pending, _)| pending == to)
+        })
+    }
+
+    /// Controls wait while a switch is unconfirmed, and after an abandoned one
+    /// until playback is back here.
+    fn holding_controls(&self) -> bool {
+        self.switch_pending() || self.held_after_reclaim
+    }
+
+    /// Where playback is when a switch didn't go through: here if the engine
+    /// plays, otherwise the device confirmed before.
+    fn playback_home(&self) -> Target {
+        if self.local_ready && self.local.is_active() {
+            Target::Local
+        } else {
+            Target::Remote(self.selected_device.clone())
+        }
+    }
+
+    /// Sends the controls held during a switch to where playback ended up, one
+    /// after another in the order they were given.
+    fn apply_held_controls(&mut self, target: Target) {
+        use crate::backend::RemoteStep;
+        let steps = std::mem::take(&mut self.held_controls).into_steps();
+        if steps.is_empty() {
+            return;
+        }
+        let shuffles = steps
+            .iter()
+            .any(|step| matches!(step, RemoteStep::Shuffle(_)));
+        let skips = steps.iter().any(|step| {
+            matches!(
+                step,
+                RemoteStep::Next | RemoteStep::Previous | RemoteStep::PlayRequest { .. }
+            )
+        });
+        match target {
+            Target::Local => {
+                // A held skip recorded its expectation for the remote device;
+                // it now happens here, so it must settle here.
+                if skips {
+                    if let Some(intent) = &mut self.intent_track {
+                        intent.confirmation = TrackConfirmation::Local;
+                    }
+                    if matches!(self.queue_start_pending, Some(Target::Remote(_))) {
+                        self.queue_start_pending = Some(Target::Local);
+                    }
+                }
+                let mut playing = self.local.playback == crate::player::Playback::Playing;
+                for step in steps {
+                    let command = match step {
+                        RemoteStep::PlayRequest { request, .. } => {
+                            // The hold is over: this takes the normal path here.
+                            self.play_request(*request, false);
+                            playing = true;
+                            None
+                        }
+                        RemoteStep::Next => Some(PlayerCommand::Next),
+                        RemoteStep::Previous => Some(PlayerCommand::Previous),
+                        RemoteStep::Seek(position_ms) => Some(PlayerCommand::Seek(position_ms)),
+                        RemoteStep::Shuffle(on) => Some(PlayerCommand::Shuffle(on)),
+                        RemoteStep::Repeat(mode) => {
+                            Some(PlayerCommand::Repeat(RepeatMode::from_api(&mode)))
+                        }
+                        RemoteStep::Play => (!playing).then(|| {
+                            playing = true;
+                            PlayerCommand::Play
+                        }),
+                        RemoteStep::Pause => {
+                            // Paused may still be loading: say it outright.
+                            playing = false;
+                            Some(PlayerCommand::Pause)
+                        }
+                    };
+                    if let Some(command) = command {
+                        self.backend.player(command);
+                    }
+                }
+            }
+            Target::Remote(device_id) => {
+                let mut steps = steps;
+                // A held shuffle step before a pick already turns shuffle on:
+                // the pick needn't send it again.
+                let mut shuffled = false;
+                for step in &mut steps {
+                    match step {
+                        RemoteStep::Shuffle(on) => shuffled = *on,
+                        RemoteStep::PlayRequest { shuffle, .. } if shuffled => *shuffle = false,
+                        _ => {}
+                    }
+                }
+                // A held skip is sent only now: count mismatches from here,
+                // including for one expected to settle here before the engine
+                // let go.
+                if skips && let Some(intent) = &mut self.intent_track {
+                    intent.confirmation = TrackConfirmation::Remote {
+                        after_poll: self.remote_poll_seq,
+                        mismatches: 0,
+                    };
+                }
+                // Keep showing what was chosen until the device reports it.
+                for step in &steps {
+                    match step {
+                        RemoteStep::Seek(position_ms) => {
+                            self.pending_remote_position = Some((*position_ms, Instant::now()));
+                            self.confirmed_seek = Some(*position_ms);
+                        }
+                        RemoteStep::Play => self.optimistic_playing = Some((true, Instant::now())),
+                        RemoteStep::Pause => {
+                            self.optimistic_playing = Some((false, Instant::now()))
+                        }
+                        RemoteStep::Shuffle(on) => {
+                            if let Some(remote) = self.remote.as_mut() {
+                                remote.state.shuffle_state = *on;
+                            }
+                        }
+                        RemoteStep::Repeat(mode) => {
+                            if let Some(remote) = self.remote.as_mut() {
+                                remote.state.repeat_state = mode.clone();
+                            }
+                        }
+                        RemoteStep::Next
+                        | RemoteStep::Previous
+                        | RemoteStep::PlayRequest { .. } => {}
+                    }
+                }
+                self.backend
+                    .api(ApiRequest::RemoteSequence { device_id, steps });
+            }
+        }
+        if shuffles {
+            // Sent now: stale reports of the old mode mustn't revert it (after
+            // the steps: a held pick's play_request resets this bookkeeping).
+            self.shuffle_set_at = Some(Instant::now());
+            self.note_shuffle_pending();
+        }
     }
 
     /// A device switch finished. Only the switch still pending counts: a result
@@ -7425,22 +7968,64 @@ impl App {
             .transfer_fallback
             .as_ref()
             .is_some_and(|(to, _)| *to == device_id);
+        let abandoned = self.pull_after_push.as_deref() == Some(device_id.as_str());
+        let holding = self
+            .outgoing_transfer
+            .as_ref()
+            .is_some_and(|(to, _)| *to == device_id);
         match result {
             Ok(()) if pending => {
                 self.transfer_fallback = None;
-                self.selected_device = Some(device_id);
-                self.show_devices = false;
+                // Routing stays on this device until the engine lets go (on the
+                // Web API path that comes after this answer); controls now go
+                // to it directly.
+                self.selected_device = Some(device_id.clone());
+                if holding && !self.local.is_active() {
+                    // The engine let go before this answer came.
+                    self.outgoing_transfer = None;
+                }
+                self.apply_held_controls(Target::Remote(Some(device_id)));
                 self.poll_remote_soon();
                 self.refresh_devices();
+            }
+            Ok(()) if abandoned => {
+                // It landed after all: take playback back once the engine lets
+                // go, which it does within seconds if this switch caused it.
+                self.pull_after_push = None;
+                if self.local.is_active() {
+                    self.reclaim_until = Some(Instant::now() + RECLAIM_WINDOW);
+                } else if let Some(this_computer) = self.local_device_id.clone() {
+                    self.transfer(this_computer);
+                }
             }
             Ok(()) => {}
             // A newer switch took over; it reports for itself.
             Err(crate::api::ApiError::TransferReplaced) => {}
+            Err(error) if abandoned => {
+                self.pull_after_push = None;
+                // A timed-out switch may still land later: take playback back if
+                // the engine lets go soon.
+                if matches!(error, crate::api::ApiError::TransferTimedOut) {
+                    self.reclaim_until = Some(Instant::now() + RECLAIM_WINDOW);
+                }
+                // Playback stayed where it is, and so do held controls.
+                if std::mem::take(&mut self.held_after_reclaim) {
+                    self.held_after_reclaim_until = None;
+                    self.reclaim_issued = false;
+                    let home = self.playback_home();
+                    self.apply_held_controls(home);
+                }
+            }
             Err(error) if pending => {
-                // Playback stayed where it was, and so does the chosen device.
+                // Playback stayed where it was, and so do commands.
+                if holding {
+                    self.outgoing_transfer = None;
+                }
                 if let Some((_, confirmed)) = self.transfer_fallback.take() {
                     self.selected_device = confirmed;
                 }
+                let home = self.playback_home();
+                self.apply_held_controls(home);
                 let device = self
                     .devices
                     .iter()
@@ -8375,6 +8960,10 @@ impl App {
             Action::Next if self.resume_only() => {
                 self.step_resume(true);
             }
+            Action::Next if self.holding_controls() => {
+                self.pop_queue_head();
+                self.held_controls.push(crate::backend::RemoteStep::Next);
+            }
             Action::Next => {
                 // Move the queue head to the playing row immediately. Do not
                 // pop when there is no active playback target.
@@ -8396,6 +8985,11 @@ impl App {
                 } else {
                     self.step_resume(false);
                 }
+            }
+            Action::Previous if self.holding_controls() => {
+                self.intent_track = None;
+                self.held_controls
+                    .push(crate::backend::RemoteStep::Previous);
             }
             Action::Previous => {
                 // Next names its expected destination so the row moves before
@@ -9700,6 +10294,11 @@ impl App {
         }
         if self.is_connected() {
             ctx.request_repaint_after(self.connected_repaint_interval());
+        }
+        // Held controls and the reclaim window run on deadlines checked in
+        // tick(); nothing else may wake the app while they are open.
+        if self.holding_controls() || self.reclaim_until.is_some() {
+            ctx.request_repaint_after(Duration::from_secs(1));
         }
     }
 
@@ -17597,7 +18196,7 @@ mod tests {
     }
 
     #[test]
-    fn a_device_switch_settles_on_its_answer_and_a_failed_one_restores_the_device() {
+    fn a_push_holds_commands_until_the_engine_lets_go_and_a_failed_push_restores_the_device() {
         let playing_here = || LocalState {
             connected: true,
             playback: Playback::Playing,
@@ -17608,35 +18207,38 @@ mod tests {
             track_sequence: 1,
             ..Default::default()
         };
-        let here = |name: &str| {
-            let mut app = test_app(name);
-            app.local_ready = true;
-            app.local_device_id = Some("this-computer".into());
-            app.local = playing_here();
-            app
-        };
-        let not_found = || {
-            Err(crate::api::client::ApiError::Status {
-                status: 404,
-                message: "Device not found".into(),
-            })
-        };
+        let mut app = test_app("push-window");
+        app.local_ready = true;
+        app.local_device_id = Some("this-computer".into());
+        app.local = playing_here();
 
-        // The device that took playback is the chosen one.
-        let mut app = here("switch-ok");
+        // The engine still plays while the push is in flight: commands follow the push.
         app.transfer("phone".into());
+        assert_eq!(app.target(), Target::Remote(Some("phone".into())));
+        // The engine stopping ends the window; the phone stays chosen.
+        app.handle_local(LocalState {
+            playback: Playback::Stopped,
+            ..playing_here()
+        });
+        assert_eq!(app.target(), Target::Remote(Some("phone".into())));
         app.handle_api(ApiResponse::Transferred {
             device_id: "phone".into(),
             result: Ok(()),
         });
         assert_eq!(app.selected_device.as_deref(), Some("phone"));
 
-        // A failed switch leaves playback and commands where they were.
-        let mut app = here("switch-fails");
+        // A failed push leaves playback and commands where they were.
+        let mut app = test_app("push-fails");
+        app.local_ready = true;
+        app.local_device_id = Some("this-computer".into());
+        app.local = playing_here();
         app.transfer("gone".into());
         app.handle_api(ApiResponse::Transferred {
             device_id: "gone".into(),
-            result: not_found(),
+            result: Err(crate::api::client::ApiError::Status {
+                status: 404,
+                message: "Device not found".into(),
+            }),
         });
         assert_eq!(app.target(), Target::Local);
         assert_eq!(
@@ -17645,9 +18247,18 @@ mod tests {
         );
 
         // Two switches in a row: the newer must not fall back to one that failed.
-        let mut app = here("switch-overlap");
+        let mut app = test_app("push-overlap");
+        app.local_ready = true;
+        app.local_device_id = Some("this-computer".into());
+        app.local = playing_here();
         app.transfer("first".into());
         app.transfer("second".into());
+        let not_found = || {
+            Err(crate::api::client::ApiError::Status {
+                status: 404,
+                message: "Device not found".into(),
+            })
+        };
         app.handle_api(ApiResponse::Transferred {
             device_id: "first".into(),
             result: not_found(),
@@ -17659,14 +18270,19 @@ mod tests {
         assert_eq!(app.selected_device, None);
         assert_eq!(app.target(), Target::Local);
 
-        // A switch replaced by a newer one is not an error.
-        let mut app = here("switch-replaced");
+        // A second push replaces the first: the first reports "replaced", and the
+        // hold still follows the second.
+        let mut app = test_app("push-replaced");
+        app.local_ready = true;
+        app.local_device_id = Some("this-computer".into());
+        app.local = playing_here();
         app.transfer("phone".into());
         app.transfer("speaker".into());
         app.handle_api(ApiResponse::Transferred {
             device_id: "phone".into(),
             result: Err(crate::api::ApiError::TransferReplaced),
         });
+        assert_eq!(app.target(), Target::Remote(Some("speaker".into())));
         assert!(app.toasts.is_empty(), "a replaced switch is not an error");
         app.handle_api(ApiResponse::Transferred {
             device_id: "speaker".into(),
@@ -17674,28 +18290,516 @@ mod tests {
         });
         assert_eq!(app.selected_device.as_deref(), Some("speaker"));
 
-        // Choosing this computer while a switch is on its way: its late answer
-        // doesn't flip the choice back.
-        let mut app = here("switch-abandoned");
+        // Choosing this computer while a push is on its way: the push lands
+        // anyway, the choice stays "this computer", and playback is taken back
+        // once the engine lets go.
+        let mut app = test_app("pull-during-push");
+        app.local_ready = true;
+        app.local_device_id = Some("this-computer".into());
+        app.local = playing_here();
+        app.transfer("phone".into());
+        app.transfer("this-computer".into());
+        app.backend.take_player_commands();
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "phone".into(),
+            result: Ok(()),
+        });
+        assert_eq!(
+            app.selected_device, None,
+            "the late push must not flip the choice back"
+        );
+        app.handle_local(LocalState {
+            playback: Playback::Stopped,
+            ..playing_here()
+        });
+        assert!(
+            app.backend
+                .take_player_commands()
+                .iter()
+                .any(|command| matches!(command, PlayerCommand::Transfer)),
+            "playback is taken back from the phone"
+        );
+
+        // A release long after an abandoned switch landed is someone else's doing
+        // (music started on the phone later): it must not pull playback back.
+        let mut app = test_app("reclaim-expired");
+        app.local_ready = true;
+        app.local_device_id = Some("this-computer".into());
+        app.local = playing_here();
         app.transfer("phone".into());
         app.transfer("this-computer".into());
         app.handle_api(ApiResponse::Transferred {
             device_id: "phone".into(),
             result: Ok(()),
         });
-        assert_eq!(app.selected_device, None);
+        app.reclaim_until = Some(Instant::now() - Duration::from_secs(1));
+        app.backend.take_player_commands();
+        app.handle_local(LocalState {
+            playback: Playback::Stopped,
+            ..playing_here()
+        });
+        assert!(
+            !app.backend
+                .take_player_commands()
+                .iter()
+                .any(|command| matches!(command, PlayerCommand::Transfer)),
+            "an expired reclaim does nothing"
+        );
+        // (tick() closes the expired window.)
+    }
 
-        // A device that doesn't take playback in time is reported as such.
-        let mut app = here("switch-times-out");
-        app.transfer("phone".into());
+    #[test]
+    fn controls_during_a_switch_follow_playback_to_where_it_ends_up() {
+        use crate::backend::RemoteStep;
+        let playing_here = || LocalState {
+            connected: true,
+            playback: Playback::Playing,
+            track: Some(crate::player::LocalTrack {
+                uri: "spotify:track:downside".into(),
+                ..Default::default()
+            }),
+            track_sequence: 1,
+            ..Default::default()
+        };
+        let stopped = || LocalState {
+            playback: Playback::Stopped,
+            ..playing_here()
+        };
+        let pushing = |name: &str| {
+            let mut app = test_app(name);
+            app.local_ready = true;
+            app.local_device_id = Some("this-computer".into());
+            app.local = playing_here();
+            app.transfer("phone".into());
+            app.backend.take_control_requests();
+            app.backend.take_player_commands();
+            app
+        };
+        let sequences = |app: &App| -> Vec<(Option<String>, Vec<RemoteStep>)> {
+            app.backend
+                .take_control_requests()
+                .into_iter()
+                .filter_map(|request| match request {
+                    ApiRequest::RemoteSequence { device_id, steps } => Some((device_id, steps)),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Pause during the switch: nothing reaches the phone before it takes
+        // over, then one pause does.
+        let mut app = pushing("hold-pause");
+        app.toggle_play();
+        assert!(app.backend.take_control_requests().is_empty());
+        assert!(app.backend.take_player_commands().is_empty());
+        app.handle_local(stopped());
+        // Until the switch confirms, a release alone doesn't say who took over.
+        assert!(sequences(&app).is_empty());
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "phone".into(),
+            result: Ok(()),
+        });
+        assert_eq!(
+            sequences(&app),
+            vec![(Some("phone".into()), vec![RemoteStep::Pause])]
+        );
+
+        // Toggling back and forth costs nothing.
+        let mut app = pushing("hold-toggle-twice");
+        app.toggle_play();
+        app.toggle_play();
+        app.handle_local(stopped());
+        assert!(sequences(&app).is_empty());
+
+        // Next then a seek on the new song arrive in that order, in one request;
+        // a seek before a skip is moot and dropped.
+        let mut app = pushing("hold-order");
+        app.seek(10_000);
+        app.actions.push(Action::Next);
+        app.apply_actions(&egui::Context::default());
+        app.seek(30_000);
+        app.set_shuffle(true);
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "phone".into(),
+            result: Ok(()),
+        });
+        assert_eq!(
+            sequences(&app),
+            vec![(
+                Some("phone".into()),
+                vec![
+                    RemoteStep::Next,
+                    RemoteStep::Seek(30_000),
+                    RemoteStep::Shuffle(true)
+                ]
+            )]
+        );
+        // Confirmed: controls go straight to the phone now.
+        app.toggle_play();
+        assert!(!app.backend.take_control_requests().is_empty());
+
+        // A switch replaced mid-hold keeps what was held.
+        let mut app = pushing("hold-replaced");
+        app.toggle_play();
+        app.transfer("speaker".into());
+        app.backend.take_control_requests();
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "speaker".into(),
+            result: Ok(()),
+        });
+        assert_eq!(
+            sequences(&app),
+            vec![(Some("speaker".into()), vec![RemoteStep::Pause])]
+        );
+
+        // Choosing this computer during the hold: the held controls wait until
+        // playback is back here, so the reclaim can't undo them.
+        // (a) the abandoned switch fails: they apply here at once.
+        let mut app = pushing("hold-pull-fails");
+        app.actions.push(Action::Next);
+        app.apply_actions(&egui::Context::default());
+        app.seek(90_000);
+        app.transfer("this-computer".into());
+        assert!(
+            !app.backend
+                .take_player_commands()
+                .contains(&PlayerCommand::Seek(90_000))
+        );
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "phone".into(),
+            result: Err(crate::api::ApiError::TransferTimedOut),
+        });
+        let commands = app.backend.take_player_commands();
+        assert!(commands.contains(&PlayerCommand::Next));
+        assert!(commands.contains(&PlayerCommand::Seek(90_000)));
+        assert!(
+            matches!(
+                app.intent_track.as_ref().map(|intent| &intent.confirmation),
+                None | Some(TrackConfirmation::Local)
+            ),
+            "a held skip applied here settles here"
+        );
+        // (b) the abandoned switch lands: playback is reclaimed, then they apply.
+        let mut app = pushing("hold-pull-lands");
+        app.seek(90_000);
+        app.transfer("this-computer".into());
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "phone".into(),
+            result: Ok(()),
+        });
+        app.handle_local(stopped());
+        assert!(
+            app.backend
+                .take_player_commands()
+                .iter()
+                .any(|command| matches!(command, PlayerCommand::Transfer)),
+            "playback is reclaimed"
+        );
+        assert!(
+            !app.backend
+                .take_player_commands()
+                .contains(&PlayerCommand::Seek(90_000))
+        );
+        app.handle_local(playing_here());
+        assert!(
+            app.backend
+                .take_player_commands()
+                .contains(&PlayerCommand::Seek(90_000)),
+            "held controls apply once playback is back"
+        );
+
+        // A second device picked after the first confirmed but before the engine
+        // let go: the release is the first switch landing, not the second.
+        let mut app = pushing("second-after-confirm");
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "phone".into(),
+            result: Ok(()),
+        });
+        app.transfer("speaker".into());
+        app.backend.take_control_requests();
+        app.toggle_play();
+        app.handle_local(stopped());
+        assert!(
+            sequences(&app).is_empty(),
+            "nothing goes anywhere on that release"
+        );
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "speaker".into(),
+            result: Ok(()),
+        });
+        assert_eq!(
+            sequences(&app),
+            vec![(Some("speaker".into()), vec![RemoteStep::Pause])]
+        );
+
+        // The phone confirmed, the engine let go, then a switch to a speaker
+        // fails: playback is on the phone, so what was held goes there.
+        let mut app = pushing("second-fails-after-release");
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "phone".into(),
+            result: Ok(()),
+        });
+        app.handle_local(stopped());
+        app.local = stopped();
+        app.transfer("speaker".into());
+        app.backend.take_control_requests();
+        // Nothing plays here any more, so nothing is held: controls go to the
+        // chosen device directly, and the speaker's failure restores the phone.
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "speaker".into(),
+            result: Err(crate::api::ApiError::TransferTimedOut),
+        });
+        assert_eq!(app.selected_device.as_deref(), Some("phone"));
+
+        // After choosing this computer during a hold, new controls keep waiting
+        // (they must not overtake the held ones).
+        let mut app = pushing("pull-then-toggle");
+        app.toggle_play();
+        app.transfer("this-computer".into());
+        app.backend.take_player_commands();
+        app.toggle_play();
+        assert!(
+            !app.backend
+                .take_player_commands()
+                .contains(&PlayerCommand::Toggle),
+            "held until playback is back here"
+        );
+
+        // The reclaimed engine first reports Loading: held controls wait for it to
+        // settle, then a held pause goes as an explicit Pause.
+        let mut app = pushing("reclaim-settles");
+        app.toggle_play();
+        app.transfer("this-computer".into());
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "phone".into(),
+            result: Ok(()),
+        });
+        app.handle_local(stopped());
+        app.backend.take_player_commands();
+        app.handle_local(LocalState {
+            playback: Playback::Loading,
+            ..playing_here()
+        });
+        assert!(
+            !app.backend
+                .take_player_commands()
+                .contains(&PlayerCommand::Pause)
+        );
+        app.handle_local(playing_here());
+        assert!(
+            app.backend
+                .take_player_commands()
+                .contains(&PlayerCommand::Pause)
+        );
+
+        // A switch replacing a pull-during-push keeps what was held.
+        let mut app = pushing("pull-then-push");
+        app.toggle_play();
+        app.transfer("this-computer".into());
+        app.transfer("speaker".into());
+        app.backend.take_control_requests();
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "speaker".into(),
+            result: Ok(()),
+        });
+        assert_eq!(
+            sequences(&app),
+            vec![(Some("speaker".into()), vec![RemoteStep::Pause])]
+        );
+
+        // A song picked during the switch waits, then plays on the device that
+        // took playback (sent early, the arriving transfer could replace it);
+        // it replaces what was held before it.
+        let mut app = pushing("hold-pick");
+        app.actions.push(Action::Next);
+        app.apply_actions(&egui::Context::default());
+        app.play_request(PlayRequest::tracks(vec!["spotify:track:sin".into()]), false);
+        assert!(app.backend.take_control_requests().is_empty());
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "phone".into(),
+            result: Ok(()),
+        });
+        let sent = sequences(&app);
+        assert_eq!(sent.len(), 1);
+        assert!(matches!(
+            sent[0].1.as_slice(),
+            [RemoteStep::PlayRequest { request, .. }] if request.uris == vec!["spotify:track:sin".to_string()]
+        ));
+        // If the switch fails, the picked song plays here.
+        let mut app = pushing("hold-pick-fails");
+        app.play_request(PlayRequest::tracks(vec!["spotify:track:sin".into()]), false);
         app.handle_api(ApiResponse::Transferred {
             device_id: "phone".into(),
             result: Err(crate::api::ApiError::TransferTimedOut),
         });
         assert!(
+            app.backend
+                .take_player_commands()
+                .iter()
+                .any(|command| matches!(command, PlayerCommand::Load(_)))
+        );
+
+        // Polls during the hold still report the old song (nothing was sent):
+        // the held Next's song stays shown.
+        let mut app = pushing("held-next-survives-polls");
+        app.queue = loaded_queue("spotify:track:downside", &["spotify:track:next"]);
+        app.actions.push(Action::Next);
+        app.apply_actions(&egui::Context::default());
+        let shown = app.intent_track.as_ref().map(|intent| intent.uri.clone());
+        app.reconcile_remote_track_intent(app.remote_poll_seq + 1, Some("spotify:track:downside"));
+        app.reconcile_remote_track_intent(app.remote_poll_seq + 2, Some("spotify:track:downside"));
+        assert_eq!(
+            app.intent_track.as_ref().map(|intent| intent.uri.clone()),
+            shown
+        );
+        assert!(shown.is_some());
+
+        // Paused before the switch, then a pick, then Pause: the pause is kept
+        // (the pick alone would start playing).
+        let mut app = test_app("paused-pick-pause");
+        app.local_ready = true;
+        app.local_device_id = Some("this-computer".into());
+        app.local = LocalState {
+            playback: Playback::Paused,
+            ..playing_here()
+        };
+        app.transfer("phone".into());
+        app.backend.take_control_requests();
+        app.play_request(PlayRequest::tracks(vec!["spotify:track:sin".into()]), false);
+        app.toggle_play();
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "phone".into(),
+            result: Ok(()),
+        });
+        let sent = sequences(&app);
+        assert!(matches!(
+            sent[0].1.as_slice(),
+            [RemoteStep::PlayRequest { .. }, RemoteStep::Pause]
+        ));
+
+        // A pick held while waiting for the reclaim survives the engine's track
+        // changes (letting go, the reclaim loading).
+        let mut app = pushing("pick-during-reclaim-wait");
+        app.transfer("this-computer".into());
+        app.play_request(PlayRequest::tracks(vec!["spotify:track:sin".into()]), false);
+        let shown = app.intent_track.as_ref().map(|intent| intent.uri.clone());
+        app.handle_local(LocalState {
+            track: Some(crate::player::LocalTrack {
+                uri: "spotify:track:other".into(),
+                ..Default::default()
+            }),
+            track_sequence: 2,
+            ..playing_here()
+        });
+        assert_eq!(
+            app.intent_track.as_ref().map(|intent| intent.uri.clone()),
+            shown
+        );
+
+        // Modes chosen before a pick still apply to it, and a shuffle turned on
+        // is sent once.
+        let mut app = pushing("modes-then-pick");
+        app.set_repeat(RepeatMode::Track);
+        app.set_shuffle(false);
+        app.play_request(PlayRequest::tracks(vec!["spotify:track:sin".into()]), false);
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "phone".into(),
+            result: Ok(()),
+        });
+        let sent = sequences(&app);
+        assert!(matches!(
+            sent[0].1.as_slice(),
+            [
+                RemoteStep::Repeat(_),
+                RemoteStep::Shuffle(false),
+                RemoteStep::PlayRequest { .. }
+            ]
+        ));
+        let mut app = pushing("shuffle-then-pick");
+        app.set_shuffle(true);
+        app.play_request(PlayRequest::tracks(vec!["spotify:track:sin".into()]), false);
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "phone".into(),
+            result: Ok(()),
+        });
+        let sent = sequences(&app);
+        assert!(matches!(
+            sent[0].1.as_slice(),
+            [
+                RemoteStep::Shuffle(true),
+                RemoteStep::PlayRequest { shuffle: false, .. }
+            ]
+        ));
+
+        // A held repeat stays shown when the engine reports its own mode.
+        let mut app = pushing("held-repeat");
+        app.set_repeat(RepeatMode::Track);
+        app.handle_local(playing_here());
+        assert_eq!(app.local.repeat, RepeatMode::Track);
+
+        // A held sequence that fails drops what was shown for it.
+        let mut app = pushing("sequence-fails");
+        app.actions.push(Action::Next);
+        app.apply_actions(&egui::Context::default());
+        app.handle_api(ApiResponse::RemoteSequenceFinished {
+            failed: Some((
+                RemoteAction::Next,
+                crate::api::ApiError::Status {
+                    status: 502,
+                    message: "Bad gateway".into(),
+                },
+            )),
+            reshaped_queue: true,
+            skip_lost: true,
+            play_lost: false,
+            seek_lost: false,
+        });
+        assert!(app.intent_track.is_none());
+        assert!(
+            app.toasts
+                .iter()
+                .any(|toast| toast.message.contains("skip"))
+        );
+
+        // A switch that times out: the held seek lands here.
+        let mut app = pushing("hold-timeout");
+        app.seek(90_000);
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "phone".into(),
+            result: Err(crate::api::ApiError::TransferTimedOut),
+        });
+        assert!(
+            app.backend
+                .take_player_commands()
+                .contains(&PlayerCommand::Seek(90_000))
+        );
+        assert!(
             app.toasts
                 .iter()
                 .any(|toast| toast.message.contains("didn't respond"))
+        );
+
+        // Picking the device a switch is already heading to sends nothing more.
+        let mut app = pushing("hold-repick");
+        app.transfer("phone".into());
+        assert!(app.backend.take_control_requests().is_empty());
+
+        // Pulling back after the phone confirmed but before the engine let go:
+        // playback comes back when it does, even with position ticks between.
+        let mut app = pushing("pull-after-ok");
+        app.handle_api(ApiResponse::Transferred {
+            device_id: "phone".into(),
+            result: Ok(()),
+        });
+        app.transfer("this-computer".into());
+        app.handle_local(playing_here());
+        app.backend.take_player_commands();
+        app.handle_local(stopped());
+        assert!(
+            app.backend
+                .take_player_commands()
+                .iter()
+                .any(|command| matches!(command, PlayerCommand::Transfer))
         );
     }
 

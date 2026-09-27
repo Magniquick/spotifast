@@ -275,6 +275,9 @@ impl LoadSpec {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlayerCommand {
     Toggle,
+    /// Start or keep playing / pause: an explicit state, not a flip.
+    Play,
+    Pause,
     Next,
     Previous,
     /// Remove manually queued tracks and keep context tracks.
@@ -591,6 +594,8 @@ impl Engine {
         let spirc = &self.spirc;
         match command {
             PlayerCommand::Toggle => spirc.play_pause()?,
+            PlayerCommand::Play => spirc.play()?,
+            PlayerCommand::Pause => spirc.pause()?,
             PlayerCommand::Next => spirc.next()?,
             PlayerCommand::Previous => spirc.prev()?,
             PlayerCommand::ClearQueue => spirc.clear_queue()?,

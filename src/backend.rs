@@ -94,6 +94,23 @@ pub enum RemoteAction {
     Repeat,
 }
 
+/// One control in a `RemoteSequence`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RemoteStep {
+    /// Start a song, list or context picked during the switch.
+    PlayRequest {
+        request: Box<PlayRequest>,
+        shuffle: bool,
+    },
+    Play,
+    Pause,
+    Next,
+    Previous,
+    Seek(u32),
+    Shuffle(bool),
+    Repeat(String),
+}
+
 /// Which of the two readers of the recently-played endpoint an answer
 /// belongs to: the shelf on Home, or the Recents tab in the queue panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -292,6 +309,12 @@ pub enum ApiRequest {
         percent: u8,
         flag: bool,
         repeat: String,
+    },
+    /// Controls held during a device switch, sent one after another so they
+    /// reach the device in the order they were given.
+    RemoteSequence {
+        device_id: Option<String>,
+        steps: Vec<RemoteStep>,
     },
     Transfer {
         device_id: String,
@@ -523,6 +546,16 @@ pub enum ApiResponse {
     Remote {
         action: RemoteAction,
         result: ApiResult<()>,
+    },
+    /// A `RemoteSequence` finished: the step that failed (the rest were not
+    /// sent), and whether it held a skip or shuffle that reshapes the queue.
+    RemoteSequenceFinished {
+        failed: Option<(RemoteAction, ApiError)>,
+        reshaped_queue: bool,
+        /// Kinds of step among those that failed or never ran.
+        skip_lost: bool,
+        play_lost: bool,
+        seek_lost: bool,
     },
     Transferred {
         device_id: String,
@@ -889,6 +922,8 @@ pub struct Backend {
     #[cfg(test)]
     remote_shuffle_requests: std::sync::Mutex<Vec<ApiRequest>>,
     #[cfg(test)]
+    control_requests: std::sync::Mutex<Vec<ApiRequest>>,
+    #[cfg(test)]
     queue_requests: std::sync::Mutex<Vec<ApiRequest>>,
     #[cfg(test)]
     queued_tracks: std::sync::Mutex<Vec<String>>,
@@ -975,6 +1010,8 @@ impl Backend {
             #[cfg(test)]
             remote_shuffle_requests: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
+            control_requests: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
             queue_requests: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
             queued_tracks: std::sync::Mutex::new(Vec::new()),
@@ -1034,6 +1071,15 @@ impl Backend {
     }
 
     pub fn api(&self, request: ApiRequest) {
+        #[cfg(test)]
+        if matches!(
+            request,
+            ApiRequest::Remote { .. }
+                | ApiRequest::RemoteSequence { .. }
+                | ApiRequest::Transfer { .. }
+        ) {
+            self.control_requests.lock().unwrap().push(request.clone());
+        }
         #[cfg(test)]
         if matches!(
             request,
@@ -1171,6 +1217,11 @@ impl Backend {
     #[cfg(test)]
     pub fn take_remote_shuffle_requests(&self) -> Vec<ApiRequest> {
         std::mem::take(&mut *self.remote_shuffle_requests.lock().unwrap())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_control_requests(&self) -> Vec<ApiRequest> {
+        std::mem::take(&mut *self.control_requests.lock().unwrap())
     }
 
     #[cfg(test)]
@@ -3302,6 +3353,7 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         | ApiRequest::PlaybackState { .. }
         | ApiRequest::Queue { .. }
         | ApiRequest::Remote { .. }
+        | ApiRequest::RemoteSequence { .. }
         | ApiRequest::Transfer { .. }
         | ApiRequest::ShufflePlay { .. }
         | ApiRequest::AddToQueue { .. }
@@ -3838,6 +3890,76 @@ async fn handle(
                 RemoteAction::Repeat => routed!(set_repeat(&repeat, device)),
             };
             ApiResponse::Remote { action, result }
+        }
+        ApiRequest::RemoteSequence { device_id, steps } => {
+            let device = device_id.as_deref();
+            let reshaped_queue = steps.iter().any(|step| {
+                matches!(
+                    step,
+                    RemoteStep::Next
+                        | RemoteStep::Previous
+                        | RemoteStep::Shuffle(_)
+                        | RemoteStep::PlayRequest { .. }
+                )
+            });
+            let mut failed = None;
+            let (mut skip_lost, mut play_lost, mut seek_lost) = (false, false, false);
+            let total = steps.len();
+            for (index, step) in steps.iter().cloned().enumerate() {
+                let (action, result) = match step {
+                    RemoteStep::PlayRequest { request, shuffle } => {
+                        let result = if shuffle {
+                            match routed!(set_shuffle(true, device)) {
+                                Ok(()) => routed!(play(device, Some(&request))),
+                                Err(error) => Err(error),
+                            }
+                        } else {
+                            routed!(play(device, Some(&request)))
+                        };
+                        (RemoteAction::Play, result)
+                    }
+                    RemoteStep::Play => (RemoteAction::Play, routed!(play(device, None))),
+                    RemoteStep::Pause => (RemoteAction::Pause, routed!(pause(device))),
+                    RemoteStep::Next => (RemoteAction::Next, routed!(next(device))),
+                    RemoteStep::Previous => (RemoteAction::Previous, routed!(previous(device))),
+                    RemoteStep::Seek(position_ms) => {
+                        (RemoteAction::Seek, routed!(seek(position_ms, device)))
+                    }
+                    RemoteStep::Shuffle(on) => {
+                        (RemoteAction::Shuffle, routed!(set_shuffle(on, device)))
+                    }
+                    RemoteStep::Repeat(mode) => {
+                        (RemoteAction::Repeat, routed!(set_repeat(&mode, device)))
+                    }
+                };
+                if let Err(error) = result {
+                    failed = Some((action, error));
+                    let lost = &steps[index..total];
+                    skip_lost = lost.iter().any(|step| {
+                        matches!(
+                            step,
+                            RemoteStep::Next
+                                | RemoteStep::Previous
+                                | RemoteStep::PlayRequest { .. }
+                        )
+                    });
+                    play_lost = lost.iter().any(|step| {
+                        matches!(
+                            step,
+                            RemoteStep::Play | RemoteStep::Pause | RemoteStep::PlayRequest { .. }
+                        )
+                    });
+                    seek_lost = lost.iter().any(|step| matches!(step, RemoteStep::Seek(_)));
+                    break;
+                }
+            }
+            ApiResponse::RemoteSequenceFinished {
+                failed,
+                reshaped_queue,
+                skip_lost,
+                play_lost,
+                seek_lost,
+            }
         }
         ApiRequest::ShufflePlay { device_id, play } => {
             let device = device_id.as_deref();
