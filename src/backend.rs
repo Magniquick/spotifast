@@ -824,11 +824,15 @@ pub enum Event {
         success: bool,
     },
     /// A user id resolved to a display name and profile picture (`None`
-    /// when nothing answers or there is none).
+    /// when there is none).
     UserName {
         id: String,
         name: Option<String>,
         image: Option<String>,
+    },
+    /// Looking a user up failed; asking again later may work.
+    UserNameFailed {
+        id: String,
     },
     /// Saved shows that Spotify's metadata marks as audiobooks. librespot
     /// cannot play them, so the Podcasts shelf leaves them out.
@@ -3214,9 +3218,23 @@ impl Worker {
         let events = self.events.clone();
         let waker = self.waker.clone();
         tokio::spawn(async move {
+            let mut failed = false;
             for id in ids {
-                let (name, image) = session_reads::user_profile(engine.session(), &id).await;
-                let _ = events.send(Event::UserName { id, name, image });
+                // After one failure (often a rate limit) the rest wait for the
+                // retry instead of piling on.
+                let event = if failed {
+                    Event::UserNameFailed { id }
+                } else {
+                    match session_reads::user_profile(engine.session(), &id).await {
+                        Ok((name, image)) => Event::UserName { id, name, image },
+                        Err(error) => {
+                            log::warn!("looking up user {id} failed: {error}");
+                            failed = true;
+                            Event::UserNameFailed { id }
+                        }
+                    }
+                };
+                let _ = events.send(event);
                 waker.wake();
             }
         });
