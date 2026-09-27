@@ -307,6 +307,7 @@ fn header(id: &str, list: &SessionPlaylist) -> Playlist {
             display_name: None,
         },
         collaborative: attributes.is_collaborative,
+        blend: attributes.format == "blend",
         snapshot_id: Some(snapshot(&list.revision)),
         items_count: Some(TrackCount { total: total(list) }),
         ..Default::default()
@@ -732,6 +733,20 @@ mod tests {
         assert_eq!(playlist.track_total(), 3);
         assert_eq!(playlist.snapshot_id.as_deref(), Some("AAAABw"));
         assert!(playlist.images[0].url.starts_with(IMAGE_HOST));
+        assert!(!playlist.blend);
+
+        // A Blend says so in its format; its songs are its members' additions.
+        let mut blend = SelectedListContent::new();
+        blend.set_owner_username("spotify".into());
+        blend
+            .attributes
+            .mut_or_insert_default()
+            .set_format("blend".into());
+        let blend = header(
+            "pl3",
+            &SessionPlaylist::parse(&blend, &playlist_uri()).unwrap(),
+        );
+        assert!(blend.blend);
     }
 
     #[test]

@@ -1339,8 +1339,9 @@ pub fn playlist(app: &mut App, ui: &mut egui::Ui, id: &str) {
             // playlist made together today is recognised by who added songs.
             let owner_id = playlist.owner.id.as_deref();
             // Spotify's own playlists carry adder ids of their machinery;
-            // nothing about them is a collaboration.
-            let editorial = owner_id == Some("spotify");
+            // nothing about them is a collaboration, except a Blend, whose
+            // songs are each added by a member.
+            let editorial = owner_id == Some("spotify") && !playlist.blend;
             let others = if editorial {
                 0
             } else {
