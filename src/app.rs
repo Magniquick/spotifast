@@ -30,6 +30,15 @@ use crate::util;
 
 const REMOTE_POLL_ACTIVE: Duration = Duration::from_secs(4);
 const REMOTE_POLL_IDLE: Duration = Duration::from_secs(20);
+/// How long a device switch may go unsettled: librespot answers within 30
+/// seconds, and a pull that hasn't landed by then has failed.
+const SWITCH_DEADLINE: Duration = Duration::from_secs(35);
+/// How long a switch that went wrong waits for a poll to say where playback is.
+const SWITCH_POLL_DEADLINE: Duration = Duration::from_secs(10);
+/// How soon the engine lets go after a switch the user abandoned lands.
+const RECLAIM_WINDOW: Duration = Duration::from_secs(10);
+/// How long a Web API playback command may go unanswered before it counts as lost.
+const REMOTE_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const REMOTE_FRESH: Duration = Duration::from_secs(45);
 const DEVICES_FRESH: Duration = Duration::from_secs(12);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(280);
@@ -138,6 +147,30 @@ pub struct NowPlaying {
     /// The remembered song from the last session, shown paused before a
     /// first press. Nothing is playing yet.
     pub resuming: bool,
+}
+
+/// What a device switch waits for before it is known where playback is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SwitchWait {
+    /// Its answer, and the engine letting go if it was playing.
+    Answer {
+        engine_was_active: bool,
+        answered: bool,
+    },
+    /// The engine taking playback (a pull), and a switch the user abandoned
+    /// resolving.
+    Engine,
+    /// The first poll sent after the switch went wrong.
+    Poll { after: u64 },
+}
+
+/// A device switch that hasn't settled.
+#[derive(Debug)]
+struct Switch {
+    /// The device chosen; `None` for this computer.
+    to: Option<String>,
+    wait: SwitchWait,
+    since: Instant,
 }
 
 /// A device switch waiting for its answer.
@@ -329,6 +362,23 @@ pub struct App {
     pending_switch: Option<PendingSwitch>,
     /// Numbers device switches, so an answer is matched to its own request.
     switch_seq: u64,
+    /// A device switch that hasn't settled: until it is known where playback
+    /// is, controls are disabled and a picked song waits.
+    switch: Option<Switch>,
+    /// A device chosen while a pull or a Web API command was still on its
+    /// way, switched to once they have landed.
+    queued_choice: Option<String>,
+    /// The song picked during a switch, played once it settles.
+    held_pick: Option<(PlayRequest, bool)>,
+    /// Web API commands sent and not yet answered, and when the last was sent.
+    remote_in_flight: u32,
+    remote_sent_at: Option<Instant>,
+    /// A switch the user abandoned by choosing this computer while it was on
+    /// its way, and its number. If it lands anyway, playback is taken back.
+    pull_after_push: Option<(String, u64)>,
+    /// That abandoned switch landed: take playback back if the engine lets go
+    /// before this deadline.
+    reclaim_until: Option<Instant>,
     pub queue: Loadable<Queue>,
     queue_fetched_at: Option<Instant>,
     /// Latest queue request sequence. Older responses are discarded.
@@ -821,6 +871,13 @@ impl App {
             selected_device: None,
             pending_switch: None,
             switch_seq: 0,
+            switch: None,
+            queued_choice: None,
+            held_pick: None,
+            remote_in_flight: 0,
+            remote_sent_at: None,
+            pull_after_push: None,
+            reclaim_until: None,
             queue: if session.last_track.is_some() && !session.last_queue_rows.is_empty() {
                 // The queue as it was at close, shown until something
                 // plays; then the live queue takes over.
@@ -1391,16 +1448,25 @@ impl App {
         if let Some(now) = &self.frame_now {
             return Some(now.clone());
         }
-        self.requested_track_preview()
-            .or_else(|| self.now_playing_live())
-            .or_else(|| self.resume_preview())
+        self.compute_now_playing()
     }
 
     fn refresh_frame_now(&mut self) {
-        self.frame_now = self
+        self.frame_now = self.compute_now_playing();
+    }
+
+    fn compute_now_playing(&self) -> Option<NowPlaying> {
+        let mut now = self
             .requested_track_preview()
             .or_else(|| self.now_playing_live())
             .or_else(|| self.resume_preview());
+        // Controls wait while a device switch settles.
+        if self.switch.is_some()
+            && let Some(now) = &mut now
+        {
+            now.can_control = false;
+        }
+        now
     }
 
     /// Keep the player bar on the same requested song as the playlist marker
@@ -2079,6 +2145,13 @@ impl App {
                 self.local_device_id = None;
                 // Nothing of the old account's device switches survives sign-out.
                 self.pending_switch = None;
+                self.switch = None;
+                self.queued_choice = None;
+                self.held_pick = None;
+                self.remote_in_flight = 0;
+                self.remote_sent_at = None;
+                self.pull_after_push = None;
+                self.reclaim_until = None;
                 self.local_playback = LocalPlayback::Unavailable;
                 self.remote = None;
                 self.rootlist.clear();
@@ -2315,6 +2388,16 @@ impl App {
         if let Some(volume) = held_volume {
             self.local.volume = volume;
         }
+        // The engine let go soon after a switch the user abandoned landed: take
+        // playback back. (A release after the window is someone else's doing.)
+        if self
+            .reclaim_until
+            .is_some_and(|until| !self.local.is_active() && Instant::now() < until)
+        {
+            self.reclaim_until = None;
+            self.pull();
+        }
+        self.try_settle();
         if track_changed {
             self.on_now_playing_changed();
         }
@@ -2777,6 +2860,8 @@ impl App {
         {
             self.check_for_updates(false);
         }
+
+        self.check_switch_deadlines();
 
         if self.is_connected() && !self.offline {
             self.request_resume_track();
@@ -4233,6 +4318,9 @@ impl App {
     /// rows as a fresh list instead used to take seconds, threw the
     /// context away, and left Spotify's copy of the queue to reappear.
     fn play_queue_item(&mut self, index: usize, uri: String) {
+        if self.queue_waits_for_switch() {
+            return;
+        }
         if self.resume_only() {
             // Nothing is playing anywhere, so there is no live queue to
             // consume: play the shown rows as a plain list.
@@ -4979,6 +5067,23 @@ impl App {
                         }
                         if uri != previous_uri {
                             self.on_now_playing_changed();
+                        }
+                        // After a switch went wrong, Spotify says where playback
+                        // is, and the chosen device follows it.
+                        if let Some(Switch {
+                            wait: SwitchWait::Poll { after },
+                            ..
+                        }) = &self.switch
+                            && seq > *after
+                        {
+                            let device = self
+                                .remote
+                                .as_ref()
+                                .and_then(|remote| remote.state.device.as_ref())
+                                .and_then(|device| device.id.clone());
+                            self.selected_device = device
+                                .filter(|id| Some(id.as_str()) != self.local_device_id.as_deref());
+                            self.settle_switch();
                         }
                     }
                     Err(error) => log::debug!("playback state unavailable: {error}"),
@@ -6140,6 +6245,14 @@ impl App {
                 ),
             },
             ApiResponse::Remote { action, result } => {
+                self.remote_in_flight = self.remote_in_flight.saturating_sub(1);
+                // A device chosen while this was on its way can now switch.
+                if self.remote_in_flight == 0
+                    && self.switch.is_none()
+                    && let Some(device) = self.queued_choice.take()
+                {
+                    self.transfer(device);
+                }
                 if matches!(action, RemoteAction::Play | RemoteAction::Pause) {
                     self.clear_play_pending();
                 }
@@ -6482,7 +6595,7 @@ impl App {
             ));
             return;
         }
-        self.backend.api(ApiRequest::Remote {
+        self.send_remote(ApiRequest::Remote {
             action,
             device_id,
             play: None,
@@ -6720,6 +6833,12 @@ impl App {
     /// in one ordered exchange: two independent requests race, and shuffle
     /// sometimes lost.
     fn play_request(&mut self, request: PlayRequest, shuffle_first: bool) {
+        // A song picked during a switch plays where playback ends up; sent now,
+        // the arriving switch could replace it. Only the latest pick counts.
+        if self.switch.is_some() {
+            self.held_pick = Some((request, shuffle_first));
+            return;
+        }
         // Shuffle applies across contexts until disabled. A selected row still
         // starts first; otherwise choose a random starting track.
         let mut request = request;
@@ -6804,12 +6923,12 @@ impl App {
             Target::Remote(Some(device_id)) => {
                 self.queued_play = None;
                 if shuffle {
-                    self.backend.api(ApiRequest::ShufflePlay {
+                    self.send_remote(ApiRequest::ShufflePlay {
                         device_id: Some(device_id),
                         play: request,
                     });
                 } else {
-                    self.backend.api(ApiRequest::Remote {
+                    self.send_remote(ApiRequest::Remote {
                         action: RemoteAction::Play,
                         device_id: Some(device_id),
                         play: Some(request),
@@ -7175,6 +7294,9 @@ impl App {
     }
 
     fn toggle_play(&mut self) {
+        if self.switch.is_some() {
+            return;
+        }
         let playing = self.now_playing().map(|now| now.playing);
         match self.target() {
             Target::Local => {
@@ -7235,6 +7357,9 @@ impl App {
     }
 
     fn seek(&mut self, position_ms: u32) {
+        if self.switch.is_some() {
+            return;
+        }
         // Dragging the bar under the remembered song moves the point a press
         // of play will resume from; there is no stream to seek yet.
         if self.now_playing_live().is_none() && self.resume_track.is_some() {
@@ -7246,7 +7371,7 @@ impl App {
             Target::Local => self.backend.player(PlayerCommand::Seek(position_ms)),
             Target::Remote(device_id) => {
                 self.pending_remote_position = Some((position_ms, Instant::now()));
-                self.backend.api(ApiRequest::Remote {
+                self.send_remote(ApiRequest::Remote {
                     action: RemoteAction::Seek,
                     device_id,
                     play: None,
@@ -7276,6 +7401,10 @@ impl App {
     /// `settle` is false while the slider is still moving: the level is heard
     /// at once, and Spotify is told where it ended up on release.
     fn set_volume(&mut self, percent: u8, settle: bool) {
+        // During a switch only the engine still playing here can be heard.
+        if self.switch.is_some() && !self.local.is_active() {
+            return;
+        }
         let percent = percent.min(100);
         match self.target() {
             Target::Local => {
@@ -7298,7 +7427,7 @@ impl App {
             Target::Remote(_) if !settle => {}
             Target::Remote(device_id) => {
                 self.pending_remote_volume = Some((percent, Instant::now()));
-                self.backend.api(ApiRequest::Remote {
+                self.send_remote(ApiRequest::Remote {
                     action: RemoteAction::Volume,
                     device_id,
                     play: None,
@@ -7331,6 +7460,9 @@ impl App {
     }
 
     fn set_shuffle(&mut self, shuffle: bool) {
+        if self.switch.is_some() {
+            return;
+        }
         self.shuffle_wanted = shuffle;
         self.shuffle_set_at = Some(Instant::now());
         self.session_dirty = true;
@@ -7351,7 +7483,7 @@ impl App {
                 if let Some(remote) = self.remote.as_mut() {
                     remote.state.shuffle_state = shuffle;
                 }
-                self.backend.api(ApiRequest::Remote {
+                self.send_remote(ApiRequest::Remote {
                     action: RemoteAction::Shuffle,
                     device_id,
                     play: None,
@@ -7365,6 +7497,9 @@ impl App {
     }
 
     fn set_repeat(&mut self, mode: RepeatMode) {
+        if self.switch.is_some() {
+            return;
+        }
         match self.target() {
             Target::Local => {
                 self.local.repeat = mode;
@@ -7374,7 +7509,7 @@ impl App {
                 if let Some(remote) = self.remote.as_mut() {
                     remote.state.repeat_state = mode.api_name().to_string();
                 }
-                self.backend.api(ApiRequest::Remote {
+                self.send_remote(ApiRequest::Remote {
                     action: RemoteAction::Repeat,
                     device_id,
                     play: None,
@@ -7388,26 +7523,65 @@ impl App {
     }
 
     fn transfer(&mut self, device_id: String) {
+        // A pull can't be recalled, and a Web API command still on its way
+        // would race the switch: choose once they have landed.
+        let pulling = matches!(
+            self.switch,
+            Some(Switch {
+                wait: SwitchWait::Engine,
+                ..
+            })
+        ) && !self.local.is_active();
+        if pulling || self.remote_busy() {
+            self.queued_choice = Some(device_id);
+            self.show_devices = false;
+            return;
+        }
+        self.queued_choice = None;
         if Some(device_id.as_str()) == self.local_device_id.as_deref() {
             // A switch still on its way can't be recalled; its answer no longer
-            // decides the chosen device.
-            self.pending_switch = None;
+            // decides the chosen device, and if it lands, playback comes back.
+            if let Some(pending) = self.pending_switch.take() {
+                self.pull_after_push = Some((pending.device, pending.seq));
+            } else if matches!(
+                self.switch,
+                Some(Switch {
+                    wait: SwitchWait::Answer {
+                        engine_was_active: true,
+                        answered: true,
+                    },
+                    ..
+                })
+            ) {
+                // It landed and the engine hasn't let go yet: it will, and then
+                // playback comes back.
+                self.reclaim_until = Some(Instant::now() + RECLAIM_WINDOW);
+            }
+            // A pull lands only when another device holds playback and the engine
+            // is connected; otherwise there is nothing to wait for.
+            let pull_lands = !self.local.is_active()
+                && self.local.connected
+                && self.remote_fresh().is_some_and(|remote| {
+                    remote
+                        .state
+                        .device
+                        .as_ref()
+                        .is_some_and(|device| device.id != self.local_device_id)
+                });
             self.selected_device = None;
             self.show_devices = false;
             if !self.local.is_active() {
-                // Connect transfers the active device's full playback state.
-                // A Web API snapshot may be stale and cannot recreate its queue.
-                self.queue_start_pending = Some(Target::Local);
-                self.local_transfer_sequence = Some(self.local.track_sequence);
-                self.local_list = None;
-                self.resume_queue.clear();
-                self.queued_play = None;
-                self.intent_track = None;
-                self.assumed_context = None;
-                self.optimistic_playing = None;
-                self.clear_play_pending();
-                self.backend.player(PlayerCommand::Transfer);
+                self.pull();
             }
+            // Playback is here only once the engine plays and nothing abandoned
+            // can still land over it.
+            self.switch =
+                (pull_lands || self.pull_after_push.is_some() || self.reclaim_until.is_some())
+                    .then(|| Switch {
+                        to: None,
+                        wait: SwitchWait::Engine,
+                        since: Instant::now(),
+                    });
             self.poll_remote_soon();
             return;
         }
@@ -7427,6 +7601,17 @@ impl App {
         self.pending_switch = Some(PendingSwitch {
             device: device_id.clone(),
             seq,
+        });
+        // A new switch supersedes taking playback back.
+        self.pull_after_push = None;
+        self.reclaim_until = None;
+        self.switch = Some(Switch {
+            to: Some(device_id.clone()),
+            wait: SwitchWait::Answer {
+                engine_was_active: self.local.is_active(),
+                answered: false,
+            },
+            since: Instant::now(),
         });
         self.backend.api(ApiRequest::Transfer {
             device_id,
@@ -7448,20 +7633,53 @@ impl App {
             .pending_switch
             .as_ref()
             .is_some_and(|pending| pending.seq == seq);
+        let abandoned = self
+            .pull_after_push
+            .as_ref()
+            .is_some_and(|(_, abandoned)| *abandoned == seq);
         match result {
             Ok(()) if pending => {
                 self.pending_switch = None;
                 self.selected_device = Some(device_id);
                 self.show_devices = false;
+                if let Some(Switch {
+                    wait: SwitchWait::Answer { answered, .. },
+                    ..
+                }) = &mut self.switch
+                {
+                    *answered = true;
+                }
                 self.poll_remote_soon();
                 self.refresh_devices();
+                self.try_settle();
+            }
+            Ok(()) if abandoned => {
+                // It landed after all: take playback back once the engine lets
+                // go, which it does within seconds if this switch caused it.
+                self.pull_after_push = None;
+                if self.local.is_active() {
+                    self.reclaim_until = Some(Instant::now() + RECLAIM_WINDOW);
+                } else {
+                    self.pull();
+                }
+                self.try_settle();
             }
             Ok(()) => {}
+            Err(error) if abandoned => {
+                self.pull_after_push = None;
+                // A timed-out switch may still land: take playback back if the
+                // engine lets go soon.
+                if matches!(error, crate::api::ApiError::TransferTimedOut) {
+                    self.reclaim_until = Some(Instant::now() + RECLAIM_WINDOW);
+                }
+                self.try_settle();
+            }
             // A newer switch took over; it reports for itself.
             Err(crate::api::ApiError::TransferReplaced) => {}
             Err(error) if pending => {
                 // Playback stayed where it was, and so does the chosen device.
                 self.pending_switch = None;
+                self.fail_switch();
                 let device = self
                     .devices
                     .iter()
@@ -7494,6 +7712,159 @@ impl App {
             }
             Err(_) => {}
         }
+    }
+
+    /// Takes playback here from the device playing it over Connect, with its
+    /// queue and position.
+    fn pull(&mut self) {
+        // Connect transfers the active device's full playback state.
+        // A Web API snapshot may be stale and cannot recreate its queue.
+        self.queue_start_pending = Some(Target::Local);
+        self.local_transfer_sequence = Some(self.local.track_sequence);
+        self.local_list = None;
+        self.resume_queue.clear();
+        self.queued_play = None;
+        self.intent_track = None;
+        self.assumed_context = None;
+        self.optimistic_playing = None;
+        self.clear_play_pending();
+        self.backend.player(PlayerCommand::Transfer);
+    }
+
+    /// The switch went wrong: where playback is comes from the next poll.
+    fn fail_switch(&mut self) {
+        if let Some(switch) = &mut self.switch {
+            switch.wait = SwitchWait::Poll {
+                after: self.remote_poll_seq,
+            };
+            switch.since = Instant::now();
+        }
+        self.poll_remote_soon();
+    }
+
+    /// Closes windows and waits that ran out.
+    fn check_switch_deadlines(&mut self) {
+        if self
+            .reclaim_until
+            .is_some_and(|until| Instant::now() >= until)
+        {
+            self.reclaim_until = None;
+            self.try_settle();
+        }
+        if self.switch.is_none() && self.queued_choice.is_some() && !self.remote_busy() {
+            // The command a choice waited for was never answered.
+            self.remote_in_flight = 0;
+            if let Some(device) = self.queued_choice.take() {
+                self.transfer(device);
+            }
+        }
+        let Some(switch) = &self.switch else {
+            return;
+        };
+        let polling = matches!(switch.wait, SwitchWait::Poll { .. });
+        let elapsed = switch.since.elapsed();
+        if polling && elapsed >= SWITCH_POLL_DEADLINE {
+            // No poll answered: settle where playback was last known to be.
+            self.settle_switch();
+        } else if !polling
+            && elapsed >= SWITCH_DEADLINE
+            && self
+                .reclaim_until
+                .is_none_or(|until| Instant::now() >= until)
+        {
+            // Neither answered nor landed: treat it as having gone wrong, and
+            // forget answers that never came.
+            self.pending_switch = None;
+            self.pull_after_push = None;
+            self.reclaim_until = None;
+            self.fail_switch();
+        }
+    }
+
+    /// Settles the switch once it is known where playback is.
+    fn try_settle(&mut self) {
+        let Some(switch) = &self.switch else {
+            return;
+        };
+        let settled = match switch.wait {
+            SwitchWait::Answer {
+                engine_was_active,
+                answered,
+            } => answered && !(engine_was_active && self.local.is_active()),
+            SwitchWait::Engine => {
+                self.local.is_active()
+                    && self.pull_after_push.is_none()
+                    && self.reclaim_until.is_none()
+            }
+            SwitchWait::Poll { .. } => false,
+        };
+        if settled {
+            self.settle_switch();
+        }
+    }
+
+    fn settle_switch(&mut self) {
+        self.switch = None;
+        if let Some((request, shuffle_first)) = self.held_pick.take() {
+            self.play_request(request, shuffle_first);
+        }
+        if let Some(device) = self.queued_choice.take() {
+            self.transfer(device);
+        }
+    }
+
+    /// A device switch is settling: playback controls are disabled.
+    pub fn switching(&self) -> bool {
+        self.switch.is_some()
+    }
+
+    /// A device switch under way, as the player shows it.
+    pub fn switch_label(&self) -> Option<String> {
+        let switch = self.switch.as_ref()?;
+        Some(match &switch.to {
+            Some(id) => {
+                let name = self
+                    .devices
+                    .iter()
+                    .find(|device| device.id.as_deref() == Some(id.as_str()))
+                    .map(|device| device.name.clone())
+                    .filter(|name| !name.is_empty());
+                match name {
+                    // Translators: {device} is the name of the device playback is moving to.
+                    Some(name) => {
+                        gettext(self.locale, "Switching to {device}").replace("{device}", &name)
+                    }
+                    None => gettext(self.locale, "Switching devices").into_owned(),
+                }
+            }
+            None => gettext(self.locale, "Switching to this computer").into_owned(),
+        })
+    }
+
+    /// Sends a Web API playback command, counted until it is answered.
+    fn send_remote(&mut self, request: ApiRequest) {
+        self.remote_in_flight += 1;
+        self.remote_sent_at = Some(Instant::now());
+        self.backend.api(request);
+    }
+
+    /// A Web API command is on its way. One unanswered for longer than a
+    /// request can take was lost (a replaced grant drops its answers).
+    fn remote_busy(&self) -> bool {
+        self.remote_in_flight > 0
+            && self
+                .remote_sent_at
+                .is_some_and(|at| at.elapsed() < REMOTE_COMMAND_TIMEOUT)
+    }
+
+    /// Queue changes are refused during a device switch: sent now they would
+    /// reach a device that hasn't taken playback, or one about to lose it.
+    fn queue_waits_for_switch(&mut self) -> bool {
+        if self.switch.is_none() {
+            return false;
+        }
+        self.toast(gettext(self.locale, "Wait for the device switch to finish"));
+        true
     }
 
     /// Adds a row to Next up immediately, before the context's upcoming rows.
@@ -8396,6 +8767,7 @@ impl App {
             Action::Next if self.resume_only() => {
                 self.step_resume(true);
             }
+            Action::Next | Action::Previous if self.switch.is_some() => {}
             Action::Next => {
                 // Move the queue head to the playing row immediately. Do not
                 // pop when there is no active playback target.
@@ -8481,6 +8853,12 @@ impl App {
                 self.set_repeat(mode.next());
             }
             Action::SetRepeat(mode) => self.set_repeat(mode),
+            Action::AddToQueue { .. }
+            | Action::QueueMany { .. }
+            | Action::MoveInQueue { .. }
+            | Action::InsertInQueue { .. }
+            | Action::ClearQueue
+                if self.queue_waits_for_switch() => {}
             Action::AddToQueue { uri, label } => self.add_to_queue(uri, label),
             Action::QueueMany { songs } => self.queue_many(songs),
             Action::MoveInQueue { from, to } => {
@@ -9721,6 +10099,11 @@ impl App {
         }
         if self.is_connected() {
             ctx.request_repaint_after(self.connected_repaint_interval());
+        }
+        // A switch settles on deadlines checked in tick(); nothing else may
+        // wake the app while one is open.
+        if self.switch.is_some() || self.reclaim_until.is_some() {
+            ctx.request_repaint_after(Duration::from_secs(1));
         }
     }
 
@@ -17615,6 +17998,301 @@ mod tests {
             "confirmed edits stop protecting an old page"
         );
         assert!(app.playlist_pages.len() <= 12);
+    }
+
+    #[test]
+    fn controls_wait_until_it_is_known_where_a_switch_put_playback() {
+        use crate::backend::RemoteAction;
+        let playing_here = || LocalState {
+            connected: true,
+            playback: Playback::Playing,
+            track: Some(crate::player::LocalTrack {
+                uri: "spotify:track:downside".into(),
+                ..Default::default()
+            }),
+            track_sequence: 1,
+            ..Default::default()
+        };
+        let released = || LocalState {
+            playback: Playback::Stopped,
+            ..playing_here()
+        };
+        let here = |name: &str| {
+            let mut app = test_app(name);
+            app.local_ready = true;
+            app.local_device_id = Some("this-computer".into());
+            app.local = playing_here();
+            app
+        };
+        let answer = |app: &mut App, device: &str, seq: u64, result| {
+            app.handle_api(ApiResponse::Transferred {
+                device_id: device.into(),
+                seq,
+                result,
+            });
+        };
+        let not_found = || {
+            Err(crate::api::client::ApiError::Status {
+                status: 404,
+                message: "Device not found".into(),
+            })
+        };
+        let poll_answer = |app: &mut App, device: Option<&str>| {
+            app.auth = AuthStatus::Connected {
+                username: "user".into(),
+            };
+            app.poll_remote(true);
+            let state = device.map(|id| crate::api::models::PlaybackState {
+                device: Some(crate::api::models::Device {
+                    id: Some(id.into()),
+                    name: id.into(),
+                    is_active: true,
+                    ..Default::default()
+                }),
+                is_playing: true,
+                ..Default::default()
+            });
+            app.handle_api(ApiResponse::PlaybackState {
+                seq: app.remote_poll_seq,
+                result: Ok(state),
+            });
+        };
+        let plays = |app: &App| {
+            app.backend
+                .take_control_requests()
+                .into_iter()
+                .filter_map(|request| match request {
+                    ApiRequest::Remote {
+                        action: RemoteAction::Play,
+                        device_id,
+                        play: Some(play),
+                        ..
+                    } => Some((device_id, play.uris)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // A push: controls do nothing until the device took playback and the
+        // engine let go; a song picked meanwhile then plays there.
+        let mut app = here("grey-push");
+        app.transfer("phone".into());
+        let seq = app.switch_seq;
+        app.backend.take_control_requests();
+        app.backend.take_player_commands();
+        assert!(app.switching());
+        assert!(!app.now_playing().unwrap().can_control);
+        app.toggle_play();
+        app.seek(30_000);
+        app.play_request(PlayRequest::tracks(vec!["spotify:track:sin".into()]), false);
+        assert!(app.backend.take_player_commands().is_empty());
+        assert!(app.backend.take_control_requests().is_empty());
+        answer(&mut app, "phone", seq, Ok(()));
+        assert!(app.switching(), "the engine still plays here");
+        app.handle_local(released());
+        assert!(!app.switching());
+        assert_eq!(
+            plays(&app),
+            vec![(Some("phone".into()), vec!["spotify:track:sin".into()])]
+        );
+
+        // A failed switch settles on the next poll, and the chosen device is the
+        // one the poll says plays (here: a replaced switch that landed anyway).
+        let mut app = here("grey-fails");
+        app.transfer("speaker".into());
+        let first = app.switch_seq;
+        app.transfer("phone".into());
+        let second = app.switch_seq;
+        answer(
+            &mut app,
+            "speaker",
+            first,
+            Err(crate::api::ApiError::TransferReplaced),
+        );
+        answer(
+            &mut app,
+            "phone",
+            second,
+            Err(crate::api::ApiError::TransferTimedOut),
+        );
+        assert!(app.switching());
+        app.handle_local(released());
+        poll_answer(&mut app, Some("speaker"));
+        assert!(!app.switching());
+        assert_eq!(app.target(), Target::Remote(Some("speaker".into())));
+
+        // Choosing this computer while a push is on its way: controls wait until
+        // the abandoned push is known to have failed, or its landing was undone.
+        let mut app = here("grey-pull-during-push");
+        app.transfer("phone".into());
+        let seq = app.switch_seq;
+        app.transfer("this-computer".into());
+        assert!(
+            app.switching(),
+            "the push can still land over this computer"
+        );
+        answer(&mut app, "phone", seq, Ok(()));
+        app.backend.take_player_commands();
+        app.handle_local(released());
+        assert!(
+            app.backend
+                .take_player_commands()
+                .contains(&PlayerCommand::Transfer),
+            "playback is taken back"
+        );
+        assert!(app.switching());
+        app.handle_local(playing_here());
+        assert!(!app.switching());
+
+        // An idle, connected engine while the phone plays.
+        let phone_plays = |name: &str| {
+            let mut app = test_app(name);
+            app.local_ready = true;
+            app.local_device_id = Some("this-computer".into());
+            app.local.connected = true;
+            app.selected_device = Some("phone".into());
+            app.remote = Some(RemoteSnapshot {
+                state: crate::api::models::PlaybackState {
+                    device: Some(crate::api::models::Device {
+                        id: Some("phone".into()),
+                        name: "Phone".into(),
+                        is_active: true,
+                        ..Default::default()
+                    }),
+                    is_playing: true,
+                    ..Default::default()
+                },
+                received_at: Instant::now(),
+            });
+            app
+        };
+
+        // A device chosen while a pull is on its way waits for the pull.
+        let mut app = phone_plays("grey-choice-during-pull");
+        app.transfer("this-computer".into());
+        app.transfer("speaker".into());
+        assert!(
+            !app.backend
+                .take_control_requests()
+                .iter()
+                .any(|request| matches!(request, ApiRequest::Transfer { .. })),
+            "a pull can't be recalled"
+        );
+        app.handle_local(playing_here());
+        assert!(
+            app.backend
+                .take_control_requests()
+                .iter()
+                .any(|request| matches!(request, ApiRequest::Transfer { device_id, .. } if device_id == "speaker"))
+        );
+
+        // A pull that never lands settles on a poll after its deadline.
+        let mut app = phone_plays("grey-pull-deadline");
+        app.transfer("this-computer".into());
+        if let Some(switch) = &mut app.switch {
+            switch.since -= SWITCH_DEADLINE;
+        }
+        app.check_switch_deadlines();
+        assert!(matches!(
+            app.switch,
+            Some(Switch {
+                wait: SwitchWait::Poll { .. },
+                ..
+            })
+        ));
+        poll_answer(&mut app, Some("phone"));
+        assert!(!app.switching());
+        assert_eq!(app.target(), Target::Remote(Some("phone".into())));
+
+        // With nothing to take playback from, choosing this computer waits
+        // for nothing.
+        let mut app = test_app("grey-nothing-to-pull");
+        app.local_ready = true;
+        app.local_device_id = Some("this-computer".into());
+        app.transfer("this-computer".into());
+        assert!(!app.switching());
+
+        // A switch that went wrong settles on a poll, or after the poll's
+        // deadline where playback was last known to be.
+        let mut app = phone_plays("grey-poll-deadline");
+        app.transfer("speaker".into());
+        let seq = app.switch_seq;
+        answer(
+            &mut app,
+            "speaker",
+            seq,
+            Err(crate::api::ApiError::TransferTimedOut),
+        );
+        if let Some(switch) = &mut app.switch {
+            switch.since -= SWITCH_POLL_DEADLINE;
+        }
+        app.check_switch_deadlines();
+        assert!(!app.switching());
+        assert_eq!(app.target(), Target::Remote(Some("phone".into())));
+
+        // An abandoned push that fails: playback never left, so it settles here.
+        let mut app = here("grey-abandoned-fails");
+        app.transfer("phone".into());
+        let seq = app.switch_seq;
+        app.transfer("this-computer".into());
+        assert!(app.switching());
+        answer(&mut app, "phone", seq, not_found());
+        assert!(!app.switching());
+
+        // One that times out may still land: controls wait for the reclaim
+        // window, then settle.
+        let mut app = here("grey-abandoned-times-out");
+        app.transfer("phone".into());
+        let seq = app.switch_seq;
+        app.transfer("this-computer".into());
+        answer(
+            &mut app,
+            "phone",
+            seq,
+            Err(crate::api::ApiError::TransferTimedOut),
+        );
+        assert!(app.switching(), "it may still land");
+        app.reclaim_until = Some(Instant::now() - Duration::from_millis(1));
+        app.check_switch_deadlines();
+        assert!(!app.switching());
+
+        // Queue changes wait for the switch, and say so.
+        let mut app = here("grey-queue");
+        app.transfer("phone".into());
+        app.backend.take_player_commands();
+        app.actions.push(Action::AddToQueue {
+            uri: "spotify:track:sin".into(),
+            label: "Sin".into(),
+        });
+        app.actions.push(Action::QueueMany {
+            songs: vec![("spotify:track:sin".into(), "Sin".into())],
+        });
+        app.apply_actions(&egui::Context::default());
+        assert!(app.backend.take_player_commands().is_empty());
+        assert!(app.backend.take_queue_requests().is_empty());
+        assert!(!app.toasts.is_empty());
+
+        // A command whose answer was lost doesn't hold a switch back for good.
+        let mut app = phone_plays("grey-command-lost");
+        app.remote_in_flight = 1;
+        app.remote_sent_at = Some(Instant::now() - REMOTE_COMMAND_TIMEOUT);
+        app.transfer("speaker".into());
+        assert!(app.switching());
+
+        // A switch waits for a Web API command still on its way.
+        let mut app = test_app("grey-command-in-flight");
+        app.local_ready = true;
+        app.local_device_id = Some("this-computer".into());
+        app.selected_device = Some("phone".into());
+        app.remote_in_flight = 1;
+        app.remote_sent_at = Some(Instant::now());
+        app.transfer("speaker".into());
+        assert!(!app.switching());
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Pause,
+            result: Ok(()),
+        });
+        assert!(app.switching(), "the switch goes once the command landed");
     }
 
     #[test]

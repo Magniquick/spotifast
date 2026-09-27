@@ -573,7 +573,8 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
     // on screen this puts equal breathing room above and beneath the
     // cluster.
     let cy = region.center().y - 8.0;
-    let enabled = now.is_some_and(|now| now.can_control) || app.is_connected();
+    let enabled =
+        !app.switching() && (now.is_some_and(|now| now.can_control) || app.is_connected());
     let playing = now.is_some_and(|now| now.playing);
     let loading = now.is_some_and(|now| now.loading);
     let shuffle = now.map_or_else(|| app.playing_context_shuffle(), |now| now.shuffle);

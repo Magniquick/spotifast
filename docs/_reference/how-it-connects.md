@@ -315,6 +315,16 @@ time is reported by name, and playback stays where it was. This costs no Web API
 requests; the Web API switches devices only when nothing is active to transfer
 from, or when local playback isn't set up.
 
+Until it is known where a switch put playback, the playback controls are
+disabled and the player says which device playback is moving to. That is when
+the device confirms it took playback and this computer's player has let go,
+when this computer's player takes over, or, after a switch fails or times out,
+Spotify's next report of where playback is. A push typically settles within a
+second. A song picked meanwhile plays where playback ends up. Choosing another
+device waits for a switch back to this computer, which can't be recalled, and
+for any playback command still on its way. Queue changes are refused until the
+switch settles.
+
 When the PulseAudio backend is selected on Linux, its PulseAudio or PipeWire
 stream is named **Spotifast**, with **Spotify playback** as its description, so
 system mixers and audio processors can identify and route it. Explicit
