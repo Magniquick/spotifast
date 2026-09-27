@@ -1,0 +1,15 @@
+body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; background: #15171b; color: #e8eaed; }
+h1 { font-size: 18px; margin: 0 0 6px; } p { margin: 4px 0; color: #b8bcc4; max-width: 900px; }
+.bar { margin: 8px 0; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.bar span { color: #9aa0a8; margin-right: 4px; }
+button { background: #252830; color: #e8eaed; border: 1px solid #3a3f48; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button.on { background: #1ed760; color: #000; border-color: #1ed760; }
+img { max-width: 100%; display: block; }
+#slider { position: relative; display: inline-block; max-width: 100%; }
+#slideAfterWrap { position: absolute; inset: 0; clip-path: inset(0 0 0 50%); }
+#range { width: 100%; }
+code { color: #e0b341; }
+h2 { font-size: 15px; margin: 18px 0 4px; }
+.live { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start; }
+.live figure { margin: 0; max-width: 48%; } .live img { max-height: 70vh; width: auto; }
+figcaption { color: #9aa0a8; font-size: 12px; margin-top: 4px; }

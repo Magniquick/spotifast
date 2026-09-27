@@ -1,0 +1,16 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Show who added each song, with their picture, including in Blends</title><link rel="stylesheet" href="review.css"></head>
+<body data-pr="addedby" data-states="blend,collaborative">
+<h1>Show who added each song, with their picture, including in Blends</h1>
+<p>Before, a Blend showed no Added by column and no members, and the Added by column showed names only. After, a Blend names its members in the byline and shows an Added by column, and every adder has a round picture beside the name. At the narrow width the column is hidden in both.</p><p>The Blend ("Kasia + Sam") and the members' pictures come from local-only demo scenes <code>blend</code> and <code>avatars</code> that are not part of the PR.</p>
+<p>Baseline: <code>crmne/spotifast main 7e2d6c5</code>. Candidate: <code>Magniquick/spotifast added-by f9da2f7</code>. Captured on Linux (CachyOS) in a headless Wayland compositor (sway) with demo data; pointer and scrolling driven through a virtual pointer. Keys: <code>b</code> before, <code>a</code> after.</p>
+<div class="bar"><span>State</span><button data-k="state" data-v="blend">Blend</button><button data-k="state" data-v="collaborative">Collaborative playlist</button></div>
+<div class="bar"><span>Theme</span><button data-k="theme" data-v="dark">Dark</button><button data-k="theme" data-v="light">Light</button>
+<span>Window</span><button data-k="width" data-v="normal">Normal 1440x900</button><button data-k="width" data-v="narrow">Narrow 1100x800</button></div>
+<div class="bar"><span>View</span><button data-k="mode" data-v="toggle">Before/After</button><button data-k="mode" data-v="slider">Slider</button>
+<button data-k="side" data-v="before">Before</button><button data-k="side" data-v="after">After</button> <span id="label"></span></div>
+<img id="single" alt="capture">
+<div id="slider"><img id="slideBefore" alt="before"><div id="slideAfterWrap"><img id="slideAfter" alt="after"></div><input id="range" type="range" min="0" max="100" value="50"></div>
+<h2>Live app</h2>
+<p>Real-account captures from the running app on Linux (CachyOS, Hyprland), dark theme. Window sizes differ from the demo captures.</p>
+<div class="live"><figure><img src="manual/addedby-blend-live-after-dark.png" alt="After: a three-member Blend"><figcaption>After: a three-member Blend</figcaption></figure><figure><img src="manual/addedby-collab-live-after-dark.png" alt="After: a collaborative playlist"><figcaption>After: a collaborative playlist</figcaption></figure></div>
+<script src="review.js"></script></body></html>

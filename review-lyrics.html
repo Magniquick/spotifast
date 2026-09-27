@@ -1,0 +1,10 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Stop lyrics scrolling most of a view past the last line</title><link rel="stylesheet" href="review.css"></head>
+<body>
+<h1>Stop lyrics scrolling most of a view past the last line</h1>
+<p>Early in a song (paused at 0:05, not following), the lyrics are scrolled by hand to the very end. Before, the last line ends near the top of an otherwise empty view. After, the last line sits near the bottom with a small margin. Panel and full screen.</p>
+<p>Baseline: <code>crmne/spotifast main 7e2d6c5</code>. Candidate: <code>Magniquick/spotifast lyrics-end-padding 68b62fb</code>.</p>
+<p>No demo-mode captures: this state needs a live pointer hover or a hand scroll, which demo mode cannot script. The captures below come from the running app with each build.</p>
+<h2>Live app</h2>
+<p>Real-account captures on Linux (CachyOS, Hyprland), dark theme, normal window.</p>
+<div class="live"><figure><img src="manual/lyrics-panel-before-dark.png" alt="Before: scrolled to the end"><figcaption>Before: scrolled to the end</figcaption></figure><figure><img src="manual/lyrics-panel-after-dark.png" alt="After: scrolled to the end"><figcaption>After: scrolled to the end</figcaption></figure></div>
+</body></html>

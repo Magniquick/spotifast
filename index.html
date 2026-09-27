@@ -1,0 +1,31 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Spotifast visual reviews</title><link rel="stylesheet" href="review.css">
+<style>iframe { width: 100%; height: calc(100vh - 150px); border: 1px solid #3a3f48; border-radius: 8px; background: #15171b; }</style></head>
+<body>
+<h1>Spotifast visual reviews</h1>
+<p>One comparison per pull request; only the selected one loads. Captured on Linux (CachyOS), headless Wayland (sway), demo data.</p>
+<div class="bar">
+<button id="prev">Previous</button>
+<select id="pick"></select>
+<button id="next">Next</button>
+<a id="direct" style="color:#1ed760" href="#">Open directly</a>
+</div>
+<p id="note"></p>
+<iframe id="frame" title="comparison"></iframe>
+<script>
+const reviews = [
+  { pr: 'PR #TBD', name: "Show the visualizer tooltip only over the bar's empty space", page: 'review-tooltip.html' },
+  { pr: 'PR #TBD', name: 'Stop lyrics scrolling most of a view past the last line', page: 'review-lyrics.html' },
+  { pr: 'PR #TBD', name: "Show a playlist's Date added column only when its songs have dates", page: 'review-date.html' },
+  { pr: 'PR #TBD', name: 'Show who added each song, with their picture, including in Blends', page: 'review-addedby.html' }
+];
+const notes = 'Each page also shows real-account captures from the live app under Live app.';
+const pick = document.getElementById('pick');
+reviews.forEach((r, i) => pick.add(new Option(`${r.pr}: ${r.name}`, i)));
+let i = Math.max(0, reviews.findIndex(r => r.page === location.hash.slice(1)));
+function show() { pick.value = i; document.getElementById('frame').src = reviews[i].page; document.getElementById('direct').href = reviews[i].page; location.hash = reviews[i].page; }
+pick.onchange = () => { i = +pick.value; show(); };
+document.getElementById('prev').onclick = () => { i = (i + reviews.length - 1) % reviews.length; show(); };
+document.getElementById('next').onclick = () => { i = (i + 1) % reviews.length; show(); };
+document.getElementById('note').textContent = notes;
+show();
+</script></body></html>

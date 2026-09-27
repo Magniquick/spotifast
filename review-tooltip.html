@@ -1,0 +1,10 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Show the visualizer tooltip only over the bar&#x27;s empty space</title><link rel="stylesheet" href="review.css"></head>
+<body>
+<h1>Show the visualizer tooltip only over the bar&#x27;s empty space</h1>
+<p>The pointer hovers the player bar&#x27;s empty space until &quot;Click to change the visualizer&quot; shows, then moves onto the play button. Before, the visualizer tooltip follows the pointer onto the button. After, it closes on reaching the button, whose own tooltip takes over once it is due.</p>
+<p>Baseline: <code>crmne/spotifast main 7e2d6c5</code>. Candidate: <code>Magniquick/spotifast visualizer-tooltip-scope 11ebbf7</code>.</p>
+<p>No demo-mode captures: this state needs a live pointer hover or a hand scroll, which demo mode cannot script. The captures below come from the running app with each build.</p>
+<h2>Live app</h2>
+<p>Real-account captures on Linux (CachyOS, Hyprland), dark theme, normal window.</p>
+<div class="live"><figure><img src="manual/visualizer-tooltip-before-dark.png" alt="Before: the visualizer tooltip over the play button"><figcaption>Before: the visualizer tooltip over the play button</figcaption></figure><figure><img src="manual/visualizer-tooltip-after-dark.png" alt="After: only the play button&#x27;s own tooltip"><figcaption>After: only the play button&#x27;s own tooltip</figcaption></figure></div>
+</body></html>
