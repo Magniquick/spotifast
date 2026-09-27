@@ -77,6 +77,8 @@ AUR and Homebrew packages now use the Spotifast name. See [rename compatibility]
   Right-click album, artist, and podcast cards for their actions (available since 0.8.0).
 - **Search** across songs, artists, albums, playlists, podcasts, and episodes,
   with a top result and per-type views. Right-click results and cards for their actions.
+  A song picked from the results plays on its own and continues with what Spotify
+  suggests after it, as in the Spotify apps, rather than queueing the other results.
   When Spotify provides an artist profile, its name on a song opens that page,
   including from the top result.
   Text fields offer Cut, Copy, Paste and Select all from their right-click menu.
