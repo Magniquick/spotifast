@@ -496,16 +496,22 @@ impl ApiClient {
                 continue;
             }
             let text = response.text().await?;
+            let endpoint = path.split('?').next().unwrap_or(path);
             log::debug!(
-                "Spotify request source={} method={} status={} duration_ms={}",
+                "Spotify request source={} method={} path={} status={} duration_ms={}",
                 self.source,
                 method,
+                endpoint,
                 status.as_u16(),
                 started.elapsed().as_millis()
             );
             if status.is_success() {
                 return Ok(text);
             }
+            log::debug!(
+                "Spotify error body path={endpoint}: {}",
+                text.chars().take(400).collect::<String>()
+            );
             let message = serde_json::from_str::<ApiErrorBody>(&text)
                 .ok()
                 .map(|body| body.error.message)
