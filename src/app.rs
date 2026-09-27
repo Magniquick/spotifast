@@ -140,6 +140,13 @@ pub struct NowPlaying {
     pub resuming: bool,
 }
 
+/// A device switch waiting for its answer.
+#[derive(Debug)]
+struct PendingSwitch {
+    device: String,
+    seq: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     Local,
@@ -318,6 +325,10 @@ pub struct App {
     pub devices_loading: bool,
     devices_fetched_at: Option<Instant>,
     pub selected_device: Option<String>,
+    /// The device switch waiting for its answer.
+    pending_switch: Option<PendingSwitch>,
+    /// Numbers device switches, so an answer is matched to its own request.
+    switch_seq: u64,
     pub queue: Loadable<Queue>,
     queue_fetched_at: Option<Instant>,
     /// Latest queue request sequence. Older responses are discarded.
@@ -808,6 +819,8 @@ impl App {
             devices_loading: false,
             devices_fetched_at: None,
             selected_device: None,
+            pending_switch: None,
+            switch_seq: 0,
             queue: if session.last_track.is_some() && !session.last_queue_rows.is_empty() {
                 // The queue as it was at close, shown until something
                 // plays; then the live queue takes over.
@@ -2064,6 +2077,8 @@ impl App {
                 self.local = LocalState::default();
                 self.local_ready = false;
                 self.local_device_id = None;
+                // Nothing of the old account's device switches survives sign-out.
+                self.pending_switch = None;
                 self.local_playback = LocalPlayback::Unavailable;
                 self.remote = None;
                 self.rootlist.clear();
@@ -6171,19 +6186,11 @@ impl App {
                 }
                 self.poll_remote_soon();
             }
-            ApiResponse::Transferred { device_id, result } => match result {
-                Ok(()) => {
-                    self.selected_device = Some(device_id);
-                    self.show_devices = false;
-                    self.poll_remote_soon();
-                    self.refresh_devices();
-                }
-                Err(error) => self.toast_error(
-                    // Translators: {error} is an error message.
-                    gettext(self.locale, "Couldn't switch device: {error}")
-                        .replace("{error}", &error.to_string()),
-                ),
-            },
+            ApiResponse::Transferred {
+                device_id,
+                seq,
+                result,
+            } => self.transferred(device_id, seq, result),
             ApiResponse::QueueAdded { label: _, result } => match result {
                 Ok(()) => {
                     // Refresh the queue after the optimistic update.
@@ -7382,6 +7389,9 @@ impl App {
 
     fn transfer(&mut self, device_id: String) {
         if Some(device_id.as_str()) == self.local_device_id.as_deref() {
+            // A switch still on its way can't be recalled; its answer no longer
+            // decides the chosen device.
+            self.pending_switch = None;
             self.selected_device = None;
             self.show_devices = false;
             if !self.local.is_active() {
@@ -7401,9 +7411,89 @@ impl App {
             self.poll_remote_soon();
             return;
         }
+        if self
+            .pending_switch
+            .as_ref()
+            .is_some_and(|pending| pending.device == device_id)
+        {
+            // Already on its way there.
+            self.show_devices = false;
+            return;
+        }
         let play = self.now_playing().is_some_and(|now| now.playing);
-        self.selected_device = Some(device_id.clone());
-        self.backend.api(ApiRequest::Transfer { device_id, play });
+        // Controls keep going where playback is until the device takes it.
+        self.switch_seq += 1;
+        let seq = self.switch_seq;
+        self.pending_switch = Some(PendingSwitch {
+            device: device_id.clone(),
+            seq,
+        });
+        self.backend.api(ApiRequest::Transfer {
+            device_id,
+            play,
+            seq,
+        });
+    }
+
+    /// A device switch finished. Only the switch still pending counts: a result
+    /// for one the user replaced or abandoned is stale, even when it names the
+    /// same device (going back to a device picked a moment ago).
+    fn transferred(
+        &mut self,
+        device_id: String,
+        seq: u64,
+        result: Result<(), crate::api::ApiError>,
+    ) {
+        let pending = self
+            .pending_switch
+            .as_ref()
+            .is_some_and(|pending| pending.seq == seq);
+        match result {
+            Ok(()) if pending => {
+                self.pending_switch = None;
+                self.selected_device = Some(device_id);
+                self.show_devices = false;
+                self.poll_remote_soon();
+                self.refresh_devices();
+            }
+            Ok(()) => {}
+            // A newer switch took over; it reports for itself.
+            Err(crate::api::ApiError::TransferReplaced) => {}
+            Err(error) if pending => {
+                // Playback stayed where it was, and so does the chosen device.
+                self.pending_switch = None;
+                let device = self
+                    .devices
+                    .iter()
+                    .find(|device| device.id.as_deref() == Some(device_id.as_str()))
+                    .map(|device| device.name.clone())
+                    .filter(|name| !name.is_empty());
+                let message = match (&error, device) {
+                    (crate::api::ApiError::TransferTimedOut, Some(device)) => {
+                        // Translators: {device} is a Spotify Connect device name.
+                        gettext(self.locale, "{device} didn't respond").replace("{device}", &device)
+                    }
+                    (crate::api::ApiError::TransferTimedOut, None) => {
+                        gettext(self.locale, "The device didn't respond").to_string()
+                    }
+                    (crate::api::ApiError::Status { status: 404, .. }, Some(device)) => {
+                        // Translators: {device} is a Spotify Connect device name.
+                        gettext(self.locale, "{device} isn't available")
+                            .replace("{device}", &device)
+                    }
+                    (crate::api::ApiError::Status { status: 404, .. }, None) => {
+                        gettext(self.locale, "The device isn't available").to_string()
+                    }
+                    (error, _) => {
+                        // Translators: {error} is an error message.
+                        gettext(self.locale, "Couldn't switch device: {error}")
+                            .replace("{error}", &error.to_string())
+                    }
+                };
+                self.toast_error(message);
+            }
+            Err(_) => {}
+        }
     }
 
     /// Adds a row to Next up immediately, before the context's upcoming rows.
@@ -17525,6 +17615,123 @@ mod tests {
             "confirmed edits stop protecting an old page"
         );
         assert!(app.playlist_pages.len() <= 12);
+    }
+
+    #[test]
+    fn a_device_switch_settles_on_its_answer_and_a_failed_one_leaves_the_device() {
+        let playing_here = || LocalState {
+            connected: true,
+            playback: Playback::Playing,
+            track: Some(crate::player::LocalTrack {
+                uri: "spotify:track:downside".into(),
+                ..Default::default()
+            }),
+            track_sequence: 1,
+            ..Default::default()
+        };
+        let here = |name: &str| {
+            let mut app = test_app(name);
+            app.local_ready = true;
+            app.local_device_id = Some("this-computer".into());
+            app.local = playing_here();
+            app
+        };
+        // Switches to `device` and returns the number its answer carries.
+        let switch = |app: &mut App, device: &str| {
+            app.transfer(device.into());
+            app.switch_seq
+        };
+        let answer = |app: &mut App, device: &str, seq: u64, result| {
+            app.handle_api(ApiResponse::Transferred {
+                device_id: device.into(),
+                seq,
+                result,
+            });
+        };
+        let not_found = || {
+            Err(crate::api::client::ApiError::Status {
+                status: 404,
+                message: "Device not found".into(),
+            })
+        };
+
+        // The device that took playback is the chosen one.
+        let mut app = here("switch-ok");
+        let seq = switch(&mut app, "phone");
+        answer(&mut app, "phone", seq, Ok(()));
+        assert_eq!(app.selected_device.as_deref(), Some("phone"));
+
+        // A failed switch leaves playback and commands where they were.
+        let mut app = here("switch-fails");
+        let seq = switch(&mut app, "gone");
+        answer(&mut app, "gone", seq, not_found());
+        assert_eq!(app.target(), Target::Local);
+        assert_eq!(
+            app.selected_device, None,
+            "the failed device must not stay chosen"
+        );
+
+        // Two switches in a row: the newer must not fall back to one that failed.
+        let mut app = here("switch-overlap");
+        let first = switch(&mut app, "first");
+        let second = switch(&mut app, "second");
+        answer(&mut app, "first", first, not_found());
+        answer(&mut app, "second", second, not_found());
+        assert_eq!(app.selected_device, None);
+        assert_eq!(app.target(), Target::Local);
+
+        // A switch replaced by a newer one is not an error.
+        let mut app = here("switch-replaced");
+        let first = switch(&mut app, "phone");
+        let second = switch(&mut app, "speaker");
+        answer(
+            &mut app,
+            "phone",
+            first,
+            Err(crate::api::ApiError::TransferReplaced),
+        );
+        assert!(app.toasts.is_empty(), "a replaced switch is not an error");
+        answer(&mut app, "speaker", second, Ok(()));
+        assert_eq!(app.selected_device.as_deref(), Some("speaker"));
+
+        // Choosing this computer while a switch is on its way: its late answer
+        // doesn't flip the choice back.
+        let mut app = here("switch-abandoned");
+        let seq = switch(&mut app, "phone");
+        app.transfer("this-computer".into());
+        answer(&mut app, "phone", seq, Ok(()));
+        assert_eq!(app.selected_device, None);
+
+        // Back to a device picked a moment ago: the earlier switch's answer,
+        // arriving late, is not the answer to the new one.
+        let mut app = here("switch-same-device-again");
+        let first = switch(&mut app, "phone");
+        app.transfer("this-computer".into());
+        let second = switch(&mut app, "phone");
+        answer(&mut app, "phone", first, Ok(()));
+        assert!(
+            app.pending_switch
+                .as_ref()
+                .is_some_and(|pending| pending.seq == second),
+            "the new switch is still waiting for its own answer"
+        );
+        answer(&mut app, "phone", second, not_found());
+        assert_eq!(app.selected_device, None);
+
+        // A device that doesn't take playback in time is reported as such.
+        let mut app = here("switch-times-out");
+        let seq = switch(&mut app, "phone");
+        answer(
+            &mut app,
+            "phone",
+            seq,
+            Err(crate::api::ApiError::TransferTimedOut),
+        );
+        assert!(
+            app.toasts
+                .iter()
+                .any(|toast| toast.message.contains("didn't respond"))
+        );
     }
 
     #[test]

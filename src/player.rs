@@ -527,6 +527,16 @@ impl Engine {
         })
     }
 
+    /// Hands playback to another device over Spotify Connect, publishing the
+    /// current state first so it resumes exactly here. Resolves once the device
+    /// is active; fails if it doesn't become active in time.
+    pub async fn transfer_to(&self, device_id: &str) -> Result<(), librespot_core::Error> {
+        let receiver = self.spirc.transfer_to(device_id)?;
+        receiver
+            .await
+            .map_err(|_| librespot_core::Error::unavailable("the playback engine stopped"))?
+    }
+
     /// The streaming session, for reads that need no Web API quota.
     pub fn session(&self) -> &Session {
         &self.session

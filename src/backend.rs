@@ -296,6 +296,8 @@ pub enum ApiRequest {
     Transfer {
         device_id: String,
         play: bool,
+        /// Echoed in the answer, which belongs to this request only.
+        seq: u64,
     },
     /// Shuffle on, then start the context, one after the other: sent as two
     /// independent requests they race, and shuffle sometimes lost.
@@ -526,6 +528,7 @@ pub enum ApiResponse {
     },
     Transferred {
         device_id: String,
+        seq: u64,
         result: ApiResult<()>,
     },
     QueueAdded {
@@ -3428,6 +3431,50 @@ async fn handle(
     request: ApiRequest,
 ) -> (ApiResponse, Option<ApiSource>) {
     let operation = operation_for(api, &request);
+    // Switch devices over Connect when the engine runs: the official clients do,
+    // it publishes the current position before handing over, it confirms the
+    // target actually took playback, and it costs no Web API quota. With
+    // nothing active to transfer from, the Web API can still start a device.
+    if let ApiRequest::Transfer { device_id, seq, .. } = &request
+        && let Some(engine) = engine
+            .filter(|engine| same_account(&engine.session().username(), api.account().as_ref()))
+    {
+        use librespot_core::error::ErrorKind;
+        let result = match engine.transfer_to(device_id).await {
+            Ok(()) => Some(Ok(())),
+            // Nothing active to transfer from, or the engine went away: the Web
+            // API can still switch the device.
+            Err(error)
+                if matches!(
+                    error.kind,
+                    ErrorKind::FailedPrecondition | ErrorKind::Unavailable | ErrorKind::Internal
+                ) =>
+            {
+                log::debug!("connect transfer not possible ({error}); asking the Web API");
+                None
+            }
+            Err(error) => Some(Err(match error.kind {
+                ErrorKind::Cancelled => ApiError::TransferReplaced,
+                ErrorKind::DeadlineExceeded => ApiError::TransferTimedOut,
+                ErrorKind::NotFound => ApiError::Status {
+                    status: 404,
+                    message: "Device not found".into(),
+                },
+                _ => ApiError::Playback(error.error.to_string()),
+            })),
+        };
+        if let Some(result) = result {
+            log::debug!("Spotify route operation={operation:?} source=connect");
+            return (
+                ApiResponse::Transferred {
+                    device_id: device_id.clone(),
+                    seq: *seq,
+                    result,
+                },
+                None,
+            );
+        }
+    }
     // A session whose long-lived connection has dropped still answers over
     // its HTTP client, so the engine's presence is the only liveness test;
     // a read the session truly cannot make falls back to the Web API below.
@@ -3807,7 +3854,12 @@ async fn handle(
                 result,
             }
         }
-        ApiRequest::Transfer { device_id, play } => ApiResponse::Transferred {
+        ApiRequest::Transfer {
+            device_id,
+            play,
+            seq,
+        } => ApiResponse::Transferred {
+            seq,
             result: routed!(transfer(&device_id, play)),
             device_id,
         },
