@@ -5664,6 +5664,65 @@ mod tests {
         }
     }
 
+    /// Scrolled to the end by hand early in a song, the lyrics stop at the
+    /// last line instead of most of a view past it, in the panel and in full
+    /// screen.
+    #[test]
+    fn lyrics_scroll_ends_at_the_last_line() {
+        for fullscreen in [None, Some(false)] {
+            let (ctx, mut app) = accessible_app(&format!("lyrics-scroll-end-{fullscreen:?}"));
+            app.show_lyrics_panel = true;
+            app.lyrics_fullscreen = fullscreen;
+            app.lyrics = Loadable::Loaded(Some(sample_lyrics()));
+            app.lyrics_following = false;
+            let remote = app.remote.as_mut().unwrap();
+            remote.state.is_playing = false;
+            remote.state.progress_ms = Some(5_000);
+            let last = "And there's nowhere I would rather be";
+            let mut pointer = None;
+            let mut last_bottom = None;
+            for frame in 0..40 {
+                let mut events = Vec::new();
+                if let Some(pos) = pointer {
+                    events.push(egui::Event::PointerMoved(pos));
+                    events.push(egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -400.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        time: Some(f64::from(frame) / 30.0),
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1280.0, 800.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| app.frame_ui(ui),
+                );
+                output.textures_delta.clear();
+                for shape in &output.shapes {
+                    if let egui::Shape::Text(text) = &shape.shape
+                        && text.galley.job.text == last
+                    {
+                        pointer.get_or_insert(text.pos + egui::vec2(4.0, 4.0));
+                        last_bottom = Some(text.pos.y + text.galley.size().y);
+                    }
+                }
+            }
+            let bottom = last_bottom.expect("the last line is drawn");
+            assert!(
+                bottom > 560.0,
+                "{fullscreen:?}: the last line ends at {bottom} of 800, past the song"
+            );
+            app.backend.shutdown();
+        }
+    }
+
     /// Full screen puts the cover and the lyrics side by side as one centred
     /// group, and a song without words gets its cover alone in the middle.
     #[cfg(feature = "demo")]

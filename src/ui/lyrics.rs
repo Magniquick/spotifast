@@ -191,6 +191,8 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                 );
             }
             ui.add_space(12.0);
+            // Where the part being sung is, and how far down the view it sits.
+            let mut sung: Option<(f32, f32)> = None;
             for (index, line) in lyrics.lines.iter().enumerate() {
                 let is_active = active == Some(index);
                 let lit = ui.ctx().animate_bool_with_time(
@@ -241,8 +243,11 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                     app.actions.push(Action::Seek(at_ms));
                     app.lyrics_following = true;
                 }
-                if is_active && follow {
-                    show_sung_line(ui, rect, None);
+                if is_active {
+                    sung = Some((rect.center().y, SUNG_LINE_AT));
+                    if follow {
+                        show_sung_line(ui, rect, None);
+                    }
                 }
                 ui.add_space(LINE_GAP);
             }
@@ -253,6 +258,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                     (f64::from(now.position_ms) / f64::from(now.duration_ms)).clamp(0.0, 1.0);
                 let content = ui.min_rect();
                 let y = content.top() + content.height() * fraction as f32;
+                sung = Some((y, 0.5));
                 ui.scroll_to_rect(
                     egui::Rect::from_min_max(
                         egui::pos2(content.left(), y),
@@ -261,8 +267,13 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                     Some(Align::Center),
                 );
             }
-            // Room for the last line to rise to where a sung line sits.
-            ui.add_space((ui.clip_rect().height() * (1.0 - SUNG_LINE_AT)).max(60.0));
+            // Room below the last line only for as far as the part being sung
+            // still has to rise to where it sits, so scrolling by hand stops at
+            // the end of the song rather than most of a view past it.
+            let below = sung.map_or(0.0, |(y, at)| {
+                ui.clip_rect().height() * (1.0 - at) - (ui.min_rect().bottom() - y)
+            });
+            ui.add_space(below.max(12.0));
         },
     );
     crate::autoscroll::lyrics(ui, scroll.id);
@@ -687,6 +698,8 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                 (12.0, 60.0)
             };
             ui.add_space(padding);
+            // Where the line being sung is.
+            let mut sung = None;
             for (index, line) in lyrics.lines.iter().enumerate() {
                 let is_active = active == Some(index);
                 let lit = ui.ctx().animate_bool_with_time(
@@ -738,8 +751,11 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                     app.actions.push(Action::Seek(at_ms));
                     app.actions.push(Action::FollowLyrics);
                 }
-                if is_active && follow {
-                    show_sung_line(ui, rect, Some(animation));
+                if is_active {
+                    sung = Some(rect.center().y);
+                    if follow {
+                        show_sung_line(ui, rect, Some(animation));
+                    }
                 }
                 ui.add_space(27.0);
             }
@@ -759,6 +775,8 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                     animation,
                 );
             }
+            // Only as far as the line being sung still has to rise.
+            let below = sung.map_or(0.0, |y| below - (ui.min_rect().bottom() - y));
             ui.add_space(below.max(60.0));
         });
     // Scrolling by hand means the reader wants to look elsewhere; the
