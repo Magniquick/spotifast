@@ -6,7 +6,7 @@ msgstr ""
 "Project-Id-Version: Spotifast\n"
 "Report-Msgid-Bugs-To: https://github.com/crmne/spotifast/issues/new?"
 "template=translation.yml\n"
-"POT-Creation-Date: 2026-09-27 22:38+0530\n"
+"POT-Creation-Date: 2026-09-27 22:51+0530\n"
 "PO-Revision-Date: 2026-09-09 13:30+0000\n"
 "Last-Translator: Spotifast contributors\n"
 "Language-Team: Swedish\n"
@@ -158,7 +158,7 @@ msgstr "Inga träffar."
 msgid "Sort by recently played"
 msgstr "Sortera efter nyligen spelade"
 
-#: src/ui/sidebar.rs:1828 src/ui/player_bar.rs:680 src/ui/widgets.rs:956
+#: src/ui/sidebar.rs:1828 src/ui/player_bar.rs:673 src/ui/widgets.rs:956
 #: src/ui/widgets.rs:2349 src/ui/artist.rs:329 src/ui/collection.rs:214
 #: src/ui/home.rs:147 src/ui/search.rs:390 src/ui/show.rs:311
 msgid "Play"
@@ -216,81 +216,81 @@ msgstr "{name}, mapp, hopfälld"
 msgid "{name}, folder, expanded"
 msgstr "{name}, mapp, expanderad"
 
-#: src/ui/player_bar.rs:80
+#: src/ui/player_bar.rs:76
 msgid "Click to change the visualizer"
 msgstr "Klicka för att byta visualisering"
 
-#: src/ui/player_bar.rs:400 src/ui/lyrics.rs:122 src/ui/lyrics.rs:591
+#: src/ui/player_bar.rs:393 src/ui/lyrics.rs:122 src/ui/lyrics.rs:602
 msgid "Nothing playing"
 msgstr "Inget spelas"
 
-#: src/ui/player_bar.rs:406 src/app.rs:7213
+#: src/ui/player_bar.rs:399 src/app.rs:7213
 msgid "Pick a song, album, or playlist"
 msgstr "Välj en låt, ett album eller en spellista"
 
-#: src/ui/player_bar.rs:536 src/ui/widgets.rs:560 src/ui/widgets.rs:786
+#: src/ui/player_bar.rs:529 src/ui/widgets.rs:560 src/ui/widgets.rs:786
 #: src/ui/widgets.rs:1684
 msgid "Remove from Liked Songs"
 msgstr "Ta bort från Gillade låtar"
 
-#: src/ui/player_bar.rs:542 src/ui/widgets.rs:563 src/ui/widgets.rs:789
+#: src/ui/player_bar.rs:535 src/ui/widgets.rs:563 src/ui/widgets.rs:789
 #: src/ui/widgets.rs:1686
 msgid "Save to Liked Songs"
 msgstr "Spara i Gillade låtar"
 
-#: src/ui/player_bar.rs:624 src/ui/player_bar.rs:631 src/ui/collection.rs:260
+#: src/ui/player_bar.rs:617 src/ui/player_bar.rs:624 src/ui/collection.rs:260
 msgid "Shuffle"
 msgstr "Blanda"
 
-#: src/ui/player_bar.rs:645
+#: src/ui/player_bar.rs:638
 msgid "Previous"
 msgstr "Föregående"
 
-#: src/ui/player_bar.rs:678 src/ui/collection.rs:212
+#: src/ui/player_bar.rs:671 src/ui/collection.rs:212
 msgid "Pause"
 msgstr "Pausa"
 
-#: src/ui/player_bar.rs:696
+#: src/ui/player_bar.rs:689
 msgid "Next"
 msgstr "Nästa"
 
-#: src/ui/player_bar.rs:704
+#: src/ui/player_bar.rs:697
 msgid "Repeat"
 msgstr "Upprepa"
 
-#: src/ui/player_bar.rs:708
+#: src/ui/player_bar.rs:701
 msgid "Repeat one"
 msgstr "Upprepa en låt"
 
-#: src/ui/player_bar.rs:713
+#: src/ui/player_bar.rs:706
 msgid "Repeat off"
 msgstr "Stäng av upprepning"
 
-#: src/ui/player_bar.rs:774
+#: src/ui/player_bar.rs:767
 msgid "Playback position (%)"
 msgstr "Uppspelningsposition (%)"
 
-#: src/ui/player_bar.rs:812
+#: src/ui/player_bar.rs:805
 msgid "Volume (%)"
 msgstr "Volym (%)"
 
-#: src/ui/player_bar.rs:845
+#: src/ui/player_bar.rs:838
 msgid "Unmute"
 msgstr "Slå på ljudet"
 
-#: src/ui/player_bar.rs:847
+#: src/ui/player_bar.rs:840
 msgid "Mute"
 msgstr "Stäng av ljudet"
 
-#: src/ui/player_bar.rs:866 src/ui/devices.rs:193
+#: src/ui/player_bar.rs:859 src/ui/devices.rs:193
 msgid "Connect to a device"
 msgstr "Anslut till en enhet"
 
-#: src/ui/player_bar.rs:885 src/ui/queue.rs:23 src/ui/queue.rs:72
+#: src/ui/player_bar.rs:878 src/ui/queue.rs:23 src/ui/queue.rs:72
 msgid "Queue"
 msgstr "Kö"
 
-#: src/ui/player_bar.rs:911 src/ui/lyrics.rs:60 src/ui/lyrics.rs:514
+#: src/ui/player_bar.rs:904 src/ui/lyrics.rs:60 src/ui/lyrics.rs:525
 msgid "Lyrics"
 msgstr "Låttext"
 
@@ -357,48 +357,48 @@ msgstr "Läs in fler"
 msgid "Full screen lyrics"
 msgstr "Låttext i helskärm"
 
-#: src/ui/lyrics.rs:95 src/ui/lyrics.rs:537
+#: src/ui/lyrics.rs:95 src/ui/lyrics.rs:548
 msgctxt "lyrics"
 msgid "Follow"
 msgstr "Följ"
 
-#: src/ui/lyrics.rs:123 src/ui/lyrics.rs:592
+#: src/ui/lyrics.rs:123 src/ui/lyrics.rs:603
 msgid "Play a song to see its lyrics."
 msgstr "Spela en låt för att se texten."
 
 #. Translators: Keep {error} unchanged. It is the original failure detail.
-#: src/ui/lyrics.rs:136 src/ui/lyrics.rs:369 src/ui/lyrics.rs:605
+#: src/ui/lyrics.rs:136 src/ui/lyrics.rs:380 src/ui/lyrics.rs:616
 #, rust-format
 msgid "Couldn't fetch the lyrics: {error}"
 msgstr "Kunde inte hämta låttexten: {error}"
 
-#: src/ui/lyrics.rs:142 src/ui/lyrics.rs:396 src/ui/lyrics.rs:611
+#: src/ui/lyrics.rs:142 src/ui/lyrics.rs:407 src/ui/lyrics.rs:622
 #: src/ui/settings.rs:370 src/ui/login.rs:106
 msgid "Try again"
 msgstr "Försök igen"
 
-#: src/ui/lyrics.rs:153 src/ui/lyrics.rs:362 src/ui/lyrics.rs:622
+#: src/ui/lyrics.rs:153 src/ui/lyrics.rs:373 src/ui/lyrics.rs:633
 msgid "No lyrics"
 msgstr "Ingen låttext"
 
-#: src/ui/lyrics.rs:154 src/ui/lyrics.rs:363 src/ui/lyrics.rs:623
+#: src/ui/lyrics.rs:154 src/ui/lyrics.rs:374 src/ui/lyrics.rs:634
 msgid "No lyrics found for this track."
 msgstr "Ingen text hittades för den här låten."
 
-#: src/ui/lyrics.rs:163 src/ui/lyrics.rs:358 src/ui/lyrics.rs:632
+#: src/ui/lyrics.rs:163 src/ui/lyrics.rs:369 src/ui/lyrics.rs:643
 msgid "Instrumental"
 msgstr "Instrumental"
 
-#: src/ui/lyrics.rs:164 src/ui/lyrics.rs:359 src/ui/lyrics.rs:633
+#: src/ui/lyrics.rs:164 src/ui/lyrics.rs:370 src/ui/lyrics.rs:644
 msgid "No timed lyrics for this track."
 msgstr "Ingen synkroniserad text för den här låten."
 
-#: src/ui/lyrics.rs:376 src/ui/widgets.rs:2400 src/app.rs:10141
+#: src/ui/lyrics.rs:387 src/ui/widgets.rs:2400 src/app.rs:10141
 #: src/ui/collection.rs:727
 msgid "Loading…"
 msgstr "Läser in…"
 
-#: src/ui/lyrics.rs:525
+#: src/ui/lyrics.rs:536
 msgid "Leave full screen (Esc)"
 msgstr "Lämna helskärm (Esc)"
 
