@@ -6,7 +6,7 @@ msgstr ""
 "Project-Id-Version: Spotifast\n"
 "Report-Msgid-Bugs-To: https://github.com/crmne/spotifast/issues/new?"
 "template=translation.yml\n"
-"POT-Creation-Date: 2026-09-28 00:04+0530\n"
+"POT-Creation-Date: 2026-09-28 00:12+0530\n"
 "PO-Revision-Date: 2026-09-09 13:30+0000\n"
 "Last-Translator: Spotifast contributors\n"
 "Language-Team: Italian\n"
@@ -29,12 +29,12 @@ msgid "Play {name}"
 msgstr "Riproduci {name}"
 
 #: src/ui/sidebar.rs:289 src/app.rs:2552 src/app.rs:16948
-#: src/ui/collection.rs:1662 src/ui/collection.rs:1839
+#: src/ui/collection.rs:1666 src/ui/collection.rs:1843
 msgid "Playlist"
 msgstr "Playlist"
 
 #: src/ui/sidebar.rs:299 src/app.rs:2526 src/app.rs:16953
-#: src/ui/collection.rs:1832 src/ui/home.rs:49 src/ui/keys.rs:253
+#: src/ui/collection.rs:1836 src/ui/home.rs:49 src/ui/keys.rs:253
 #: src/ui/winamp/playlist.rs:653
 msgid "Liked Songs"
 msgstr "Brani che ti piacciono"
@@ -183,7 +183,7 @@ msgstr[1] "Playlist • {count} brani"
 #. Translators: Keep {count} exactly as written. It becomes a number of songs.
 #. Translators: Keep {count} exactly as written. It becomes the number of selected songs.
 #. Translators: {count} is a number of songs.
-#: src/i18n.rs:183 src/ui/widgets.rs:530 src/ui/collection.rs:1926
+#: src/i18n.rs:183 src/ui/widgets.rs:530 src/ui/collection.rs:1930
 #, rust-format
 msgid "{count} song"
 msgid_plural "{count} songs"
@@ -337,7 +337,7 @@ msgid "Next up"
 msgstr "Successivi"
 
 #: src/ui/queue.rs:465 src/ui/queue.rs:498 src/ui/widgets.rs:2429
-#: src/ui/collection.rs:1022
+#: src/ui/collection.rs:1023
 msgid "Retry"
 msgstr "Riprova"
 
@@ -480,12 +480,12 @@ msgctxt "artist"
 msgid "Follow"
 msgstr "Segui"
 
-#: src/ui/widgets.rs:990 src/ui/collection.rs:1710 src/ui/collection.rs:1732
+#: src/ui/widgets.rs:990 src/ui/collection.rs:1714 src/ui/collection.rs:1736
 #: src/ui/show.rs:169
 msgid "Remove from Your Library"
 msgstr "Rimuovi dalla tua libreria"
 
-#: src/ui/widgets.rs:991 src/ui/collection.rs:1709
+#: src/ui/widgets.rs:991 src/ui/collection.rs:1713
 msgid "Add to Your Library"
 msgstr "Aggiungi alla tua libreria"
 
@@ -2080,37 +2080,37 @@ msgstr "Filtra"
 msgid "Unavailable"
 msgstr "Non disponibile"
 
-#: src/ui/collection.rs:863
+#: src/ui/collection.rs:864
 msgid "Nothing here yet"
 msgstr "Ancora niente qui"
 
-#: src/ui/collection.rs:864
+#: src/ui/collection.rs:865
 msgid "Added songs appear here."
 msgstr "I brani che aggiungi appaiono qui."
 
-#: src/ui/collection.rs:1256 src/ui/home.rs:653
+#: src/ui/collection.rs:1257 src/ui/home.rs:653
 msgid "Your top songs"
 msgstr "I tuoi brani più ascoltati"
 
-#: src/ui/collection.rs:1265
+#: src/ui/collection.rs:1266
 msgid "Your most-played tracks from the last four weeks."
 msgstr "I brani che hai ascoltato di più nelle ultime quattro settimane."
 
-#: src/ui/collection.rs:1658
+#: src/ui/collection.rs:1662
 msgid "Collaborative Playlist"
 msgstr "Playlist collaborativa"
 
-#: src/ui/collection.rs:1660
+#: src/ui/collection.rs:1664
 msgid "Public Playlist"
 msgstr "Playlist pubblica"
 
-#: src/ui/collection.rs:1731
+#: src/ui/collection.rs:1735
 msgid "Save to Your Library"
 msgstr "Salva nella tua libreria"
 
 #. Translators: {count} is a number of songs and {duration} their total
 #. length, such as "2 hr 13 min".
-#: src/ui/collection.rs:1939
+#: src/ui/collection.rs:1943
 #, rust-format
 msgid "{count} song, {duration}"
 msgid_plural "{count} songs, {duration}"
@@ -2118,19 +2118,19 @@ msgstr[0] "{count} brano, {duration}"
 msgstr[1] "{count} brani, {duration}"
 
 #. Translators: {name} is the name of someone who added songs to the playlist.
-#: src/ui/collection.rs:1953
+#: src/ui/collection.rs:1957
 #, rust-format
 msgid "with {name}"
 msgstr "con {name}"
 
 #. Translators: {first} and {second} are names of people who added songs.
-#: src/ui/collection.rs:1957
+#: src/ui/collection.rs:1961
 #, rust-format
 msgid "with {first} and {second}"
 msgstr "con {first} e {second}"
 
 #. Translators: {count} is how many other people added songs to the playlist.
-#: src/ui/collection.rs:1964
+#: src/ui/collection.rs:1968
 #, rust-format
 msgid "and {count} other"
 msgid_plural "and {count} others"

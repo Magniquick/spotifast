@@ -773,7 +773,8 @@ pub fn table(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
                 context: &context,
                 show_cover,
                 show_album: table.show_album,
-                added_at: added_at.as_deref(),
+                // Rows reserve the column only where the header does.
+                added_at: added_at.as_deref().filter(|_| table.show_added),
                 added_by: added_by.as_ref(),
                 show_added_by: table.show_added_by,
                 compact: false,
@@ -1441,10 +1442,13 @@ pub fn playlist(app: &mut App, ui: &mut egui::Ui, id: &str) {
                     },
                     show_album: true,
                     show_cover: true,
-                    // Spotify's own mixes carry no dates: no column for them,
-                    // or the header and the rows disagree about where the
-                    // album column sits.
-                    show_added: items.iter().any(|(_, added_at, _)| added_at.is_some()),
+                    // Spotify's own mixes carry no dates, or only the epoch
+                    // it stamps on dates it never recorded: no column for them.
+                    show_added: items.iter().any(|(_, added_at, _)| {
+                        added_at
+                            .as_deref()
+                            .is_some_and(|a| !a.starts_with("1970-01-01"))
+                    }),
                     show_added_by: made_together,
                     page: Page::Playlist(id.to_string()),
                     loading: page.items.loading,
