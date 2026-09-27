@@ -67,9 +67,7 @@ clients. Spotifast uses its session for:
 - **Display names and profile pictures** for the user IDs attached to songs
   in a playlist, one request per user. A Blend names its members itself and
   the signed-in account is already known, so neither is looked up. A lookup
-  refused for a rate limit is tried again later, and names and pictures are
-  kept for a week in `session.json` so a collaborator isn't looked up on every
-  start.
+  refused for a rate limit is tried again later.
 - **Precise EP types** for releases that the Web API groups with singles.
 - **Radio and autoplay** through Spotify's context resolver: stations seeded
   by a song, playlist, album, or artist. Each resolution is a fresh mix of 50
