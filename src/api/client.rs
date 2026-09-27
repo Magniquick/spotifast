@@ -322,6 +322,23 @@ pub struct ApiClient {
     activity: Arc<NetActivity>,
 }
 
+/// A request's path for the log, without its query and with the ids in it
+/// masked, so a log pasted into a bug report names the endpoint but not the
+/// user, playlist or song.
+fn endpoint_shape(path: &str) -> String {
+    let path = path.split('?').next().unwrap_or(path);
+    let mut after_users = false;
+    path.split('/')
+        .map(|segment| {
+            let id = after_users
+                || (segment.len() == 22 && segment.bytes().all(|b| b.is_ascii_alphanumeric()));
+            after_users = segment == "users";
+            if id { "{id}" } else { segment }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 impl ApiClient {
     pub fn new(
         http: impl Into<Http>,
@@ -496,10 +513,12 @@ impl ApiClient {
                 continue;
             }
             let text = response.text().await?;
+            let endpoint = endpoint_shape(path);
             log::debug!(
-                "Spotify request source={} method={} status={} duration_ms={}",
+                "Spotify request source={} method={} path={} status={} duration_ms={}",
                 self.source,
                 method,
+                endpoint,
                 status.as_u16(),
                 started.elapsed().as_millis()
             );
@@ -516,6 +535,7 @@ impl ApiClient {
                         .unwrap_or("request failed")
                         .to_string()
                 });
+            log::debug!("Spotify error path={endpoint}: {message}");
             return Err(ApiError::Status {
                 status: status.as_u16(),
                 message,
@@ -1425,6 +1445,22 @@ mod tests {
             .upload_playlist_cover("test", &"x".repeat(crate::playlist_cover::MAX_PAYLOAD + 1))
             .await;
         assert_eq!(result.unwrap_err().status(), Some(413));
+    }
+
+    #[test]
+    fn the_logged_endpoint_masks_ids() {
+        assert_eq!(
+            endpoint_shape("/playlists/37i9dQZF1E37t5EJXXoZmY/items?offset=100&limit=100"),
+            "/playlists/{id}/items"
+        );
+        assert_eq!(
+            endpoint_shape("/users/some.user_name/playlists"),
+            "/users/{id}/playlists"
+        );
+        assert_eq!(
+            endpoint_shape("/me/player/play?device_id=abc"),
+            "/me/player/play"
+        );
     }
 
     #[test]
