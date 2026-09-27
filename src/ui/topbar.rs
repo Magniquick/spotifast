@@ -241,14 +241,18 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
             // The badges sit at the right end but grow with their text, so
             // measure them here, before the search field takes its share.
-            let device_galley = app.now_playing().filter(|now| !now.local).map(|now| {
-                let label = match now.device_name {
-                    Some(device) => {
-                        // Translators: {device} is the name of the device playing the music.
-                        gettext(locale, "Playing on {device}").replace("{device}", &device)
-                    }
-                    None => gettext(locale, "Playing on another device").into_owned(),
-                };
+            let device_label = app.switch_label().or_else(|| {
+                app.now_playing()
+                    .filter(|now| !now.local)
+                    .map(|now| match now.device_name {
+                        Some(device) => {
+                            // Translators: {device} is the name of the device playing the music.
+                            gettext(locale, "Playing on {device}").replace("{device}", &device)
+                        }
+                        None => gettext(locale, "Playing on another device").into_owned(),
+                    })
+            });
+            let device_galley = device_label.map(|label| {
                 ui.painter()
                     .layout_no_wrap(label, theme::medium(12.5), palette.accent)
             });

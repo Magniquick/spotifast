@@ -894,6 +894,8 @@ pub struct Backend {
     #[cfg(test)]
     remote_shuffle_requests: std::sync::Mutex<Vec<ApiRequest>>,
     #[cfg(test)]
+    control_requests: std::sync::Mutex<Vec<ApiRequest>>,
+    #[cfg(test)]
     queue_requests: std::sync::Mutex<Vec<ApiRequest>>,
     #[cfg(test)]
     queued_tracks: std::sync::Mutex<Vec<String>>,
@@ -980,6 +982,8 @@ impl Backend {
             #[cfg(test)]
             remote_shuffle_requests: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
+            control_requests: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
             queue_requests: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
             queued_tracks: std::sync::Mutex::new(Vec::new()),
@@ -1039,6 +1043,15 @@ impl Backend {
     }
 
     pub fn api(&self, request: ApiRequest) {
+        #[cfg(test)]
+        if matches!(
+            request,
+            ApiRequest::Remote { .. }
+                | ApiRequest::ShufflePlay { .. }
+                | ApiRequest::Transfer { .. }
+        ) {
+            self.control_requests.lock().unwrap().push(request.clone());
+        }
         #[cfg(test)]
         if matches!(
             request,
@@ -1176,6 +1189,11 @@ impl Backend {
     #[cfg(test)]
     pub fn take_remote_shuffle_requests(&self) -> Vec<ApiRequest> {
         std::mem::take(&mut *self.remote_shuffle_requests.lock().unwrap())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_control_requests(&self) -> Vec<ApiRequest> {
+        std::mem::take(&mut *self.control_requests.lock().unwrap())
     }
 
     #[cfg(test)]
